@@ -6,7 +6,7 @@ A minimal hand-rolled ASGI app (no web framework dependency). Two routes:
   QueryBuilder builds), returning ``{"result": ...}`` or ``{"error": ...}``.
 - ``GET  /v1/health``  — ``{"ready": bool}``.
 
-``create_app`` is the standard server surface — it has **no web-framework
+``seekbase_server`` is the standard server surface — it has **no web-framework
 dependency**. The ASGI *runner* is injected by the host: run the app under your
 own uvicorn/hypercorn/gunicorn, mount it in a larger app, or use the ``serve()``
 convenience (which just calls a runner you pass, defaulting to uvicorn if it's
@@ -42,7 +42,7 @@ async def _send_json(send, status: int, obj: dict) -> None:
     await send({"type": "http.response.body", "body": data})
 
 
-def create_app(db: Seekbase, *, api_key: str | None = None):
+def seekbase_server(db: Seekbase, *, api_key: str | None = None):
     """Build an ASGI app serving ``db``. ``db`` is a normal embedded Seekbase
     (opened with ``Seekbase.open``); the server holds the schema and embedder."""
 
@@ -94,16 +94,16 @@ def serve(
     The ASGI runner is external, not a seekbase dependency. Pass your own via
     ``runner`` — any callable ``runner(app, host=..., port=...)`` (e.g.
     ``uvicorn.run``). If omitted, uvicorn is used when importable; otherwise a
-    clear error points you at ``create_app(db)`` to run under any ASGI server.
+    clear error points you at ``seekbase_server(db)`` to run under any ASGI server.
     """
-    app = create_app(db, api_key=api_key)
+    app = seekbase_server(db, api_key=api_key)
     if runner is None:
         try:
             import uvicorn
         except ModuleNotFoundError as e:
             raise ModuleNotFoundError(
                 "serve() needs an ASGI runner. Either `pip install uvicorn`, or "
-                "pass runner=..., or run `create_app(db)` under your own ASGI server."
+                "pass runner=..., or run `seekbase_server(db)` under your own ASGI server."
             ) from e
         runner = uvicorn.run
     runner(app, host=host, port=port)

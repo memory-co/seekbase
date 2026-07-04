@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from seekbase import NotSupportedYet, QueryError, ReadOnlyError, Seekbase
-from seekbase.server import create_app
+from seekbase.server import seekbase_server
 
 SCHEMA = {
     "cards": {
@@ -22,7 +22,7 @@ SCHEMA = {
 async def _pair(tmp_path, *, api_key=None, as_of=None):
     """Return (server_db, client_db). Client talks to server over ASGI."""
     server_db = await Seekbase.open(tmp_path / "db", schema=SCHEMA)
-    app = create_app(server_db, api_key=api_key)
+    app = seekbase_server(server_db, api_key=api_key)
     transport = httpx.ASGITransport(app=app)
     client_db = await Seekbase.connect(
         "http://server", api_key=api_key, as_of=as_of, transport=transport
@@ -73,7 +73,7 @@ async def test_as_of_client_is_read_only(tmp_path):
     server_db, _ = await _pair(tmp_path)
     await server_db.table("cards").insert({"card_id": "c1", "issue": "x", "kind": "k", "n": 1})
 
-    app = create_app(server_db)
+    app = seekbase_server(server_db)
     transport = httpx.ASGITransport(app=app)
     past = await Seekbase.connect(
         "http://server", as_of="2000-01-01T00:00:00+00:00", transport=transport
@@ -87,7 +87,7 @@ async def test_as_of_client_is_read_only(tmp_path):
 
 async def test_auth_required(tmp_path):
     server_db, _ = await _pair(tmp_path, api_key="secret")
-    app = create_app(server_db, api_key="secret")
+    app = seekbase_server(server_db, api_key="secret")
     transport = httpx.ASGITransport(app=app)
     bad = await Seekbase.connect("http://server", api_key="wrong", transport=transport)
     with pytest.raises(Exception):
@@ -115,7 +115,7 @@ async def test_serve_runner_is_injected(tmp_path):
 
 async def test_health(tmp_path):
     server_db = await Seekbase.open(tmp_path / "db", schema=SCHEMA)
-    app = create_app(server_db)
+    app = seekbase_server(server_db)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://server"
     ) as c:
