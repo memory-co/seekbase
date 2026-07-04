@@ -1,8 +1,14 @@
 """The public port: ``Seekbase`` (async façade) + ``QueryBuilder`` (chain).
 
-This is the only surface callers touch. Engines (DuckDB now; vector / files /
-outbox later) live behind it and are never exposed. The builder is lazy and
-immutable — each operator returns a new builder; ``await`` executes.
+Two forms, one surface (DESIGN §9):
+
+- ``await Seekbase.open(data_dir, schema=..., embedder=...)`` — embedded,
+  in-process on DuckDB.
+- ``await Seekbase.connect(url, ...)`` — remote, talking to a seekbase server
+  over HTTP.
+
+Calling code is identical either way: ``table()`` returns the same lazy,
+immutable ``QueryBuilder``; only the executor behind the port differs.
 """
 from __future__ import annotations
 
@@ -11,25 +17,30 @@ from pathlib import Path
 from typing import Any
 
 from ._engine._bridge import Bridge
-from ._engine.duck import DuckdbEngine, Plan, Predicate
-from ._types import (
-    Embedder,
-    EmbedderInvalid,
-    NotSupportedYet,
-    QueryError,
-    Row,
-)
+from ._engine.duck import DuckdbEngine
+from ._engine.executor import HttpExecutor, LocalExecutor
+from ._engine.plan import Predicate, Request
+from ._types import Embedder, EmbedderInvalid, NotSupportedYet, Row
 from .schema import parse_schema
 
 
-class Seekbase:
-    """A supabase-style embedded data port. Open one per instance directory."""
+class _Unset:
+    """Sentinel: distinguishes 'use the connection's as_of' from an explicit
+    as_of=None (the server passes the wire as_of, which may be None)."""
 
-    def __init__(self, bridge: Bridge, duck: DuckdbEngine, *, as_of: str | None) -> None:
-        self._bridge = bridge
-        self._duck = duck
+
+_UNSET = _Unset()
+
+
+class Seekbase:
+    """A supabase-style data port — embedded (``open``) or remote (``connect``)."""
+
+    def __init__(self, executor, *, as_of: str | None) -> None:
+        self._exec = executor
         self._as_of = as_of
         self._closed = False
+
+    # ─── open: embedded (in-process DuckDB) ────────────────────────────
 
     @classmethod
     async def open(
@@ -44,9 +55,8 @@ class Seekbase:
         data_dir.mkdir(parents=True, exist_ok=True)
         parsed = parse_schema(schema)
 
-        # tables with searchable columns need an embedder (enforced now so the
-        # failure is at open, not on first search — even though M1 has no
-        # vector engine yet).
+        # tables with searchable columns need an embedder (enforced at open so
+        # the failure is early — even though M1 has no vector engine yet).
         needs_embed = any(t.searchable for t in parsed.tables.values())
         if needs_embed and embedder is None:
             raise EmbedderInvalid(
@@ -54,15 +64,36 @@ class Seekbase:
             )
 
         bridge = Bridge()
-        duck = await DuckdbEngine.open(data_dir / "duck.db", parsed, bridge, as_of)
-        return cls(bridge, duck, as_of=as_of)
+        duck = await DuckdbEngine.open(data_dir / "duck.db", parsed, bridge)
+        return cls(LocalExecutor(bridge, duck), as_of=as_of)
+
+    # ─── connect: remote (HTTP to a seekbase server) ───────────────────
+
+    @classmethod
+    async def connect(
+        cls,
+        url: str,
+        *,
+        api_key: str | None = None,
+        as_of: str | None = None,
+        transport=None,
+    ) -> "Seekbase":
+        """Talk to a running seekbase server. Same port, HTTP transport. The
+        schema and embedder live on the server; the client carries neither."""
+        return cls(HttpExecutor(url, api_key=api_key, transport=transport), as_of=as_of)
+
+    # ─── surface ───────────────────────────────────────────────────────
+
+    @property
+    def ready(self) -> bool:
+        return self._exec.ready
 
     def table(self, name: str) -> "QueryBuilder":
         return QueryBuilder(_db=self, _table=name)
 
     async def sql(self, statement: str) -> list[Row]:
         """Read-only SQL passthrough (SELECT/WITH). Writes must go through the ORM."""
-        return await self._duck.sql(statement)
+        return await self._dispatch(Request(op="sql", statement=statement))
 
     async def flush(self) -> None:
         """Drain the outbox so ``search()`` reflects just-written rows.
@@ -70,20 +101,19 @@ class Seekbase:
         No-op until the vector engine lands (M3); kept on the surface so the
         contract — and HTTP semantics (DESIGN §9) — are stable from day one.
         """
-        return None
+        await self._dispatch(Request(op="flush"))
 
     async def rebuild(self) -> None:
-        raise NotSupportedYet("rebuild() lands with the file mirror (M2)")
+        await self._dispatch(Request(op="rebuild"))
 
     async def vacuum(self, *, before: str) -> None:
-        raise NotSupportedYet("vacuum() lands with the time machine (M4)")
+        await self._dispatch(Request(op="vacuum", before=before))
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        await self._duck.close()
-        self._bridge.close()
+        await self._exec.close()
 
     async def __aenter__(self) -> "Seekbase":
         return self
@@ -91,22 +121,12 @@ class Seekbase:
     async def __aexit__(self, *exc) -> None:
         await self.close()
 
-    # ─── internal execution (called by QueryBuilder) ───────────────────
+    # ─── dispatch (used by QueryBuilder and the server handler) ─────────
 
-    async def _run_select(self, qb: "QueryBuilder") -> list[Row]:
-        return await self._duck.select(qb._to_plan())
-
-    async def _run_count(self, qb: "QueryBuilder") -> int:
-        return await self._duck.count(qb._to_plan())
-
-    async def _run_insert(self, qb: "QueryBuilder") -> None:
-        await self._duck.insert(qb._table, list(qb._rows))
-
-    async def _run_delete(self, qb: "QueryBuilder") -> int:
-        return await self._duck.tombstone(qb._to_plan())
-
-
-_FILTER_OPS = ("eq", "neq", "gt", "gte", "lt", "lte", "like", "ilike")
+    async def _dispatch(self, req: Request, as_of: Any = _UNSET) -> Any:
+        if as_of is _UNSET:
+            as_of = self._as_of
+        return await self._exec.execute(req, as_of)
 
 
 @dataclass(frozen=True)
@@ -190,33 +210,21 @@ class QueryBuilder:
     # ─── terminal: count (returns awaitable int) ───────────────────────
 
     async def count(self) -> int:
-        return await self._db._run_count(self)
+        return await self._db._dispatch(self._to_request(op="count"))
 
     # ─── compile + execute ─────────────────────────────────────────────
 
-    def _to_plan(self) -> Plan:
-        return Plan(
+    def _to_request(self, op: str | None = None) -> Request:
+        return Request(
+            op=op or self._mode,
             table=self._table,
             columns=self._columns,
             predicates=self._predicates,
             orders=self._orders,
             limit=self._limit,
             offset=self._offset,
+            rows=self._rows,
         )
 
     def __await__(self):
-        return self._execute().__await__()
-
-    async def _execute(self):
-        if self._mode == "select":
-            return await self._db._run_select(self)
-        if self._mode == "insert":
-            return await self._db._run_insert(self)
-        if self._mode == "delete":
-            return await self._db._run_delete(self)
-        if self._mode == "search":
-            raise NotSupportedYet(
-                "search() executes with the vector engine (M3); the operator is "
-                "accepted now so chains are stable"
-            )
-        raise QueryError(f"unknown builder mode {self._mode!r}")
+        return self._db._dispatch(self._to_request()).__await__()

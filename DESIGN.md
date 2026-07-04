@@ -11,7 +11,7 @@
 ## 0. TL;DR
 
 - 包名 `seekbase`,`import seekbase` / `from seekbase import Seekbase`。Python **3.11+**,Apache-2.0(仓库已有 LICENSE)。
-- 三个运行时依赖:`duckdb`、`lancedb`、`pydantic>=2`。embedder 走**纯注入**;v1 自带一个**基于 embedding API 的默认实现**(`seekbase[api]`,OpenAI 兼容 `/embeddings`),核心**不加载任何本地模型**。本地 sentence-transformers 模式**记 TODO 后续做**(§10)。
+- 运行时依赖:`duckdb`、`lancedb`、`pydantic>=2`、`httpx`。embedder 走**纯注入**,但默认实现 `ApiEmbedder`(基于 embedding API,OpenAI 兼容 `/embeddings`)是**核心一部分,`pip install seekbase` 开箱即用**(`httpx` 进核心依赖,不另开 extra),核心仍**不加载任何本地模型**。本地 sentence-transformers 模式**记 TODO 后续做**(§10)。
 - **业务无关**(继承 searchbase 纪律):包里不出现 card/round/session,不读任何 Config,只收明确的值(`data_dir` / `schema` / `embedder`)。
 - 公共面就一个类 `Seekbase` + 一个链式 `QueryBuilder` + 几个值类型/协议。引擎(DuckDB/Lance/文件/outbox/planner/时光机)全在 `_engine/` 后面,不导出。
 - 一个 seekbase **实例 = 一个目录**:`<data_dir>/{duck.db, lance/, files/, _meta.json}`。拷走目录 = 拷走整个库。
@@ -43,10 +43,10 @@ dependencies = [
     "duckdb>=1.1",       # 结构化/分析引擎,原生 read_json/parquet
     "lancedb>=0.13",     # 向量引擎(吸收 searchbase 的 local 实现)
     "pydantic>=2",       # 值类型 + schema 校验(与 searchbase 一致)
+    "httpx>=0.27",       # 默认 embedder(ApiEmbedder)进核心,开箱即用
 ]
 
 [project.optional-dependencies]
-api = ["httpx>=0.27"]                # 默认 embedder:调 OpenAI 兼容 /embeddings 端点
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 # TODO: st = ["sentence-transformers>=3"]  # 本地模型 embedder,后续做(§10)
 
@@ -56,7 +56,7 @@ build-backend = "hatchling.build"
 ```
 
 - **pyarrow** 由 duckdb/lancedb 传递带入,不直接声明(两者同宗 Arrow 生态,零拷贝互通是 §3 的底子)。
-- extra `api` 只带一个轻量 HTTP 客户端(`httpx`),不碰任何模型权重;核心装完 `pip install seekbase` 不下载任何权重。**本地 `st` 模式暂不做,记 TODO(§10)。**
+- 默认 embedder 只需一个轻量 HTTP 客户端(`httpx`,已进核心依赖),不碰任何模型权重;`pip install seekbase` 装完不下载任何权重。**本地 `st` 模式暂不做,记 TODO(§10)。**
 - 无 numpy 直接依赖(向量以 `list[float]` / Arrow 进出;若内部要 ndarray 也由 lancedb 带)。
 
 ---
@@ -71,23 +71,28 @@ seekbase/                      # 仓库根
   DESIGN.md                    # 本文
   seekbase/                    # 包(flat,不用 src/)
     __init__.py                # 对外导出:Seekbase + 值类型 + 协议 + 错误
-    _types.py                  # Row/Hit/Schema 校验、Embedder/错误 —— 纯值类型
-    port.py                    # Seekbase(async 门面)+ QueryBuilder(链式)
+    _types.py                  # Row/Hit、Embedder 协议、错误层级 —— 纯值类型
+    port.py                    # Seekbase(async 门面,open/connect)+ QueryBuilder(链式)
     schema.py                  # SCHEMA 解析/校验 → 内部 TableSpec(columns/searchable/files)
+    server.py                  # 手写 ASGI app(create_app / serve)—— server 形态(§9)  [M1 已落]
+    _wire.py                   # Request 序列化 + 错误↔HTTP 状态码映射(client/server 共用)  [M1 已落]
     _engine/
-      duck.py                  # DuckdbEngine:单写者连接、DDL、SQL 编译执行、as-of 视图
-      vector.py                # VectorEngine:LanceDB 管理(吸收 searchbase.local)
-      files.py                 # FileMirror:json / jsonl 三写、原子落盘、read_json 桥
-      outbox.py                # Outbox(DuckDB 表)+ Consumer(进程内协程)
-      planner.py               # 查询规划:search()+谓词组合、过滤下推、as-of 改写
-      asof.py                  # 时光机:谓词改写 / 视图注册 / 只读闸
-      _bridge.py               # async↔sync 桥(单线程 executor,串行化 DuckDB)
+      plan.py                  # Predicate / Plan / Request —— 传输中立的查询原语  [M1 已落]
+      executor.py              # LocalExecutor(→DuckDB)/ HttpExecutor(→HTTP),两形态的接缝  [M1 已落]
+      duck.py                  # DuckdbEngine:单写者连接、DDL、SQL 编译执行、as-of 可见性
+      _bridge.py               # async↔sync 桥(单线程 executor,串行化 DuckDB)  [M1 已落]
+      vector.py                # VectorEngine:LanceDB 管理(吸收 searchbase.local)  [M3]
+      files.py                 # FileMirror:json / jsonl 三写、原子落盘、read_json 桥  [M2]
+      outbox.py                # Outbox(DuckDB 表)+ Consumer(进程内协程)  [M3]
+      planner.py               # 查询规划:search()+谓词组合、过滤下推、as-of 改写  [M3]
+      asof.py                  # 时光机:谓词改写 / 视图注册 / 只读闸  [M4]
     embedders/
       __init__.py              # Embedder 协议再导出
-      api.py                   # [api] extra:ApiEmbedder(OpenAI 兼容 /embeddings,async httpx)
+      api.py                   # 默认 ApiEmbedder(OpenAI 兼容 /embeddings,async httpx,核心自带)  [M1 已落]
       # TODO: sentence_transformer.py  # 本地模型 embedder,后续做(§10)
   tests/
-    ...
+    test_m1_orm.py             # 嵌入形态:ORM / 墓碑 / SQL / as-of / schema 校验
+    test_m1_server.py          # server 形态:同一条链走 HTTP(in-process ASGITransport)
 ```
 
 **与 searchbase 的映射**:`searchbase/local/{backend,index,maintenance,util}.py` 那摊(embed、ANN、auto_split、超长截断、压缩/EMFILE 恢复、维护协程)**整体下沉**为 `_engine/vector.py`(可拆子模块)。searchbase 的端口 `SearchBackend` **不再对外**——上层只 import `seekbase.Seekbase`。
@@ -201,7 +206,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 ```
 
 - Embedder 协议**同时容忍 sync/async**:内部 `await maybe_await(embedder.embed(...))`(检测 coroutine)。
-- **v1 自带 `ApiEmbedder`**(`seekbase[api]`):async httpx 调 OpenAI 兼容 `/embeddings`,构造收 `base_url / api_key / model / dim`,内部批量 + 退避重试。这是当前唯一自带实现;核心仍只认协议、不 import 它。
+- **v1 默认 `ApiEmbedder`(核心自带,开箱即用)**:async httpx 调 OpenAI 兼容 `/embeddings`,构造收 `base_url / api_key / model / dim`,内部批量 + 退避重试。端口仍只认 `Embedder` 协议(可换任意注入实现),但默认这一个进核心、不另开 extra。
 - **本地 sentence-transformers embedder = TODO**(§10):后续加 `seekbase[st]` + `SentenceTransformerEmbedder`,同一协议,零改端口。
 
 ---
@@ -293,6 +298,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 - **崩溃/重放**:在 ①②③ 各步之间人为中断,重开断言收敛(outbox replay + repair)。
 - **planner**:构造下推/非下推谓词混合链,断言不犯 post-filter 返空病、排序语义。
 - **并发**:并发写 + 前台读 + file 面 grep 并行,断言无锁读到完整文件、无半截 JSON。
+- **两形态一致性**:同一条链分别走嵌入与 server(用 httpx `ASGITransport` 在进程内打全链路),断言结果一致、错误保型过线、as-of 只读闸在 HTTP 上也生效。
 - **`ApiEmbedder` 冒烟**:mock 掉 httpx 端点断言批量/重试/维度;真端点用例标记跳过(需 key)。
 - 工具:`pytest` + `pytest-asyncio`;每测试一个临时 `data_dir`(tmp_path)。
 
@@ -302,19 +308,31 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 
 | 里程碑 | 内容 | 产出可用性 |
 |---|---|---|
-| **M1 骨架 + 结构化** | 包骨架、pyproject、schema 解析、DuckdbEngine、ORM(select/insert/delete)、SQL 直查、async 桥 | 纯 DuckDB ORM 能用 |
+| **M1 骨架 + 结构化 + 两形态** | 包骨架、pyproject、schema 解析、DuckdbEngine、ORM(select/insert/delete/count)、SQL 直查、async 桥、部分 as-of;**执行器抽象 + server 形态(open/connect,ASGI app,HTTP client)** | 嵌入 + server 两形态都能用 |
 | **M2 文件镜像** | FileMirror(json/jsonl、原子落盘、read_json 桥)、三写顺序、rebuild/repair | file-canonical 立住 |
 | **M3 向量 + search** | 吸收 searchbase→VectorEngine、Outbox+Consumer、planner 下推、`search()`、`flush()` | 语义查询上线 |
 | **M4 时光机** | created_at/deleted_at、as-of 视图+改写、只读闸、vacuum | 时光机严谨 |
-| **M5 打磨** | `ApiEmbedder`(`[api]`)、README、契约测试补全、错误信息、`_meta` schema 指纹 | 可发 PyPI |
+| **M5 打磨** | `ApiEmbedder`(核心自带)、README、契约测试补全、错误信息、`_meta` schema 指纹 | 可发 PyPI |
 
 一次交付 = M1→M5 全落;里程碑只为内部可验收切分。
 
 ---
 
-## 9. 云端版形态预留(不实现)
+## 9. 两种使用形态:嵌入 与 server(都做)
 
-`Seekbase.open(...)`(进程内)与未来的 `Seekbase.connect(url, api_key, as_of=…)`(HTTP)**共用一个端口**。v1 只做本地版,对设计的唯一约束:**端口不许塞「只有进程内才成立」的假设**——不漏 DuckDB 句柄、不假设调用方摸得到 `data_dir`、`flush()`/`search()`/时光机语义在 HTTP 上也说得通。§4 的公共面已按此约束设计。
+seekbase 是**一等支持的两种形态**,共用同一个 `Seekbase` 端口与 `QueryBuilder`——调用方代码逐字节相同,只有拿 `db` 句柄的方式不同:
+
+```python
+db = await Seekbase.open(data_dir, schema=…, embedder=…)      # 嵌入:进程内、DuckDB
+db = await Seekbase.connect(url, api_key=…, as_of=…)          # server:同一端口走 HTTP
+```
+
+- **一个执行器抽象撑起两形态**(`_engine/executor.py`):`LocalExecutor` 把 `Request` 直接派给 DuckdbEngine;`HttpExecutor` 把同一个 `Request` 序列化成 `POST /v1/execute` 发给 server。`QueryBuilder` 只构造 `Request`,不认识自己跑在哪种形态。
+- **server 极简、无框架**(`server.py`):手写 ASGI app,两条路由——`POST /v1/execute`(跑一个序列化的 `Request`)、`GET /v1/health`。client 端只需 httpx(核心已带);跑在端口上要 uvicorn(`seekbase[server]` extra),或 `create_app(db)` 拿裸 ASGI app 挂进自己的服务。测试用 httpx 的 in-process `ASGITransport` 打全链路,不开端口、不需 uvicorn。
+- **错误保型过线**:server 侧抛的异常按类型映射 HTTP 状态码(`_wire.py`),client 侧重建同类型异常——`ReadOnlyError` 过 HTTP 还是 `ReadOnlyError`。
+- **as_of 是 per-request**:DuckdbEngine 的 as-of 从引擎级下沉成**每次调用的参数**,所以一个 server 进程能同时服务各自 `as_of` 的多个 client;写在 `as_of` 连接上一律被 `ReadOnlyError` 挡(权威判定在 `LocalExecutor`,两形态同规矩)。
+- **auth**:单个可选 bearer token;多租户 auth 非目标(§8)。
+- **端口纪律**(两形态能共用的前提):**不塞「只有进程内才成立」的假设**——不漏 DuckDB 句柄、不假设 client 摸得到 `data_dir`、`flush()`/`search()`/时光机语义在 HTTP 上也说得通。§4 公共面按此设计。
 
 ---
 

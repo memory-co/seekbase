@@ -10,11 +10,12 @@ keywords = ["duckdb", "lancedb", "orm", "vector-search", "embedded-database"]
 dependencies = [
     "duckdb>=1.1",
     "pydantic>=2",
+    "httpx>=0.27",   # default embedder (ApiEmbedder) is core — works out of the box
     # NOTE: lancedb is added in M3 (vector engine). M1 is pure DuckDB.
 ]
 
 [project.optional-dependencies]
-api = ["httpx>=0.27"]                # default embedder: OpenAI-compatible /embeddings
+server = ["uvicorn>=0.30"]   # to serve the port over HTTP (client side needs only httpx, core)
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff", "mypy"]
 # TODO: st = ["sentence-transformers>=3"]  # local-model embedder, later (DESIGN §10)
 

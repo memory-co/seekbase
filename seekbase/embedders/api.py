@@ -1,21 +1,16 @@
 """ApiEmbedder — the default embedder (DESIGN §4.6).
 
 Calls an OpenAI-compatible ``POST {base_url}/embeddings`` endpoint. Async
-(httpx), batches inputs, and retries transient failures with backoff. Requires
-``pip install seekbase[api]``; the core never imports this.
+(httpx), batches inputs, and retries transient failures with backoff. httpx is
+a core dependency, so this works out of the box with ``pip install seekbase``.
 """
 from __future__ import annotations
 
 import asyncio
 
-from .._types import EmbedderInvalid
+import httpx
 
-try:
-    import httpx
-except ModuleNotFoundError as e:  # pragma: no cover - import guard
-    raise ModuleNotFoundError(
-        "ApiEmbedder needs httpx: pip install 'seekbase[api]'"
-    ) from e
+from .._types import EmbedderInvalid
 
 
 class ApiEmbedder:

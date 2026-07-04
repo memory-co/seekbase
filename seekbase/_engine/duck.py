@@ -5,13 +5,15 @@ M1 scope: DDL from the declared schema, the ORM read/write compilation
 the as-of visibility rewrite (partial time machine — DESIGN §7). Vector,
 outbox and file mirror slot in around this in later milestones.
 
+``as_of`` is a per-call parameter, not engine state, so one engine can serve
+many clients (embedded or over HTTP) each rewinding to their own instant.
+
 insert-only is enforced here: there is no UPDATE path except the single
 engine-managed tombstone write to ``deleted_at``.
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,9 @@ import duckdb
 from .._types import QueryError, ReadOnlyError
 from ..schema import CREATED_AT, DELETED_AT, Schema, TableSpec
 from ._bridge import Bridge
+from .plan import Plan, Predicate  # re-exported for callers
+
+__all__ = ["DuckdbEngine", "Plan", "Predicate"]
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -41,37 +46,16 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-@dataclass(frozen=True)
-class Predicate:
-    op: str
-    column: str
-    value: Any = None
-
-
-@dataclass(frozen=True)
-class Plan:
-    """Compiled-query inputs, built by the port from a QueryBuilder."""
-    table: str
-    columns: tuple[str, ...] = ()          # empty -> declared cols + created_at
-    predicates: tuple[Predicate, ...] = ()
-    orders: tuple[tuple[str, bool], ...] = ()   # (column, desc)
-    limit: int | None = None
-    offset: int | None = None
-
-
 class DuckdbEngine:
-    def __init__(self, bridge: Bridge, conn, schema: Schema, as_of: str | None) -> None:
+    def __init__(self, bridge: Bridge, conn, schema: Schema) -> None:
         self._bridge = bridge
         self._conn = conn
         self._schema = schema
-        self._as_of = as_of
 
     @classmethod
-    async def open(
-        cls, path: Path, schema: Schema, bridge: Bridge, as_of: str | None
-    ) -> "DuckdbEngine":
+    async def open(cls, path: Path, schema: Schema, bridge: Bridge) -> "DuckdbEngine":
         conn = await bridge.run(lambda: duckdb.connect(str(path)))
-        engine = cls(bridge, conn, schema, as_of)
+        engine = cls(bridge, conn, schema)
         await bridge.run(engine._create_tables)
         return engine
 
@@ -93,18 +77,20 @@ class DuckdbEngine:
 
     # ─── visibility (as-of / tombstone) ────────────────────────────────
 
-    def _visibility(self) -> tuple[str, list[Any]]:
+    def _visibility(self, as_of: str | None) -> tuple[str, list[Any]]:
         """WHERE fragment restricting to visible rows: current-state hides
         tombstones; as-of rewinds the world to T (DESIGN §7)."""
-        if self._as_of is None:
+        if as_of is None:
             return f"{_ident(DELETED_AT)} IS NULL", []
         return (
             f"{_ident(CREATED_AT)} <= ? AND "
             f"({_ident(DELETED_AT)} IS NULL OR {_ident(DELETED_AT)} > ?)",
-            [self._as_of, self._as_of],
+            [as_of, as_of],
         )
 
-    def _where(self, spec: TableSpec, preds: tuple[Predicate, ...]) -> tuple[str, list[Any]]:
+    def _where(
+        self, spec: TableSpec, preds: tuple[Predicate, ...], as_of: str | None
+    ) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
         for p in preds:
@@ -129,7 +115,7 @@ class DuckdbEngine:
                     params.append(p.value)
             else:
                 raise QueryError(f"unsupported operator {p.op!r}")
-        vis_sql, vis_params = self._visibility()
+        vis_sql, vis_params = self._visibility(as_of)
         clauses.append(vis_sql)
         params.extend(vis_params)
         return " AND ".join(clauses), params
@@ -146,10 +132,10 @@ class DuckdbEngine:
             names = [*spec.column_names, CREATED_AT]
         return ", ".join(_ident(c) for c in names)
 
-    async def select(self, plan: Plan) -> list[dict]:
+    async def select(self, plan: Plan, as_of: str | None) -> list[dict]:
         spec = self._schema.table(plan.table)
         cols = self._select_columns(spec, plan)
-        where, params = self._where(spec, plan.predicates)
+        where, params = self._where(spec, plan.predicates, as_of)
         sql = f"SELECT {cols} FROM {_ident(spec.name)} WHERE {where}"
         if plan.orders:
             parts = []
@@ -164,12 +150,12 @@ class DuckdbEngine:
             sql += f" OFFSET {int(plan.offset)}"
         return await self._bridge.run(lambda: self._fetch(sql, params))
 
-    async def count(self, plan: Plan) -> int:
+    async def count(self, plan: Plan, as_of: str | None) -> int:
         spec = self._schema.table(plan.table)
-        where, params = self._where(spec, plan.predicates)
+        where, params = self._where(spec, plan.predicates, as_of)
         sql = f"SELECT count(*) FROM {_ident(spec.name)} WHERE {where}"
-        rows = await self._bridge.run(lambda: self._conn.execute(sql, params).fetchone())
-        return int(rows[0])
+        row = await self._bridge.run(lambda: self._conn.execute(sql, params).fetchone())
+        return int(row[0])
 
     def _fetch(self, sql: str, params: list[Any]) -> list[dict]:
         cur = self._conn.execute(sql, params)
@@ -179,8 +165,6 @@ class DuckdbEngine:
     # ─── write (insert-only) ───────────────────────────────────────────
 
     async def insert(self, table: str, rows: list[dict]) -> None:
-        if self._as_of is not None:
-            raise ReadOnlyError("cannot write on a time-machine (as_of) connection")
         spec = self._schema.table(table)
         now = _utc_now()
         cols = [*spec.column_names, CREATED_AT, DELETED_AT]
@@ -204,11 +188,9 @@ class DuckdbEngine:
         await self._bridge.run(_do)
 
     async def tombstone(self, plan: Plan) -> int:
-        """delete() == mark deleted_at. Returns rows tombstoned."""
-        if self._as_of is not None:
-            raise ReadOnlyError("cannot write on a time-machine (as_of) connection")
+        """delete() == mark deleted_at on currently-live rows. Returns count."""
         spec = self._schema.table(plan.table)
-        where, params = self._where(spec, plan.predicates)
+        where, params = self._where(spec, plan.predicates, None)  # only live rows
         now = _utc_now()
         sql = f"UPDATE {_ident(spec.name)} SET {_ident(DELETED_AT)} = ? WHERE {where}"
 
@@ -221,6 +203,8 @@ class DuckdbEngine:
     # ─── read-only SQL passthrough ─────────────────────────────────────
 
     async def sql(self, statement: str) -> list[dict]:
+        # NOTE (M1): as_of is not applied to raw SQL yet — that needs the
+        # as-of view registration from M4 (DESIGN §7).
         head = statement.lstrip().split(None, 1)[0].lower() if statement.strip() else ""
         if head not in {"select", "with"}:
             raise ReadOnlyError(
