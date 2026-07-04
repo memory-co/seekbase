@@ -6,9 +6,13 @@ A minimal hand-rolled ASGI app (no web framework dependency). Two routes:
   QueryBuilder builds), returning ``{"result": ...}`` or ``{"error": ...}``.
 - ``GET  /v1/health``  — ``{"ready": bool}``.
 
-Run it behind any ASGI server (``serve()`` uses uvicorn if installed), or drive
-it in-process with an ASGI transport for tests. Auth is a single optional bearer
-token — multi-tenant auth is out of scope (DESIGN §8).
+``create_app`` is the standard server surface — it has **no web-framework
+dependency**. The ASGI *runner* is injected by the host: run the app under your
+own uvicorn/hypercorn/gunicorn, mount it in a larger app, or use the ``serve()``
+convenience (which just calls a runner you pass, defaulting to uvicorn if it's
+installed). Tests drive the app in-process via an ASGI transport — no runner at
+all. Auth is a single optional bearer token — multi-tenant auth is out of scope
+(DESIGN §8).
 """
 from __future__ import annotations
 
@@ -83,13 +87,23 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8000,
     api_key: str | None = None,
+    runner=None,
 ) -> None:
-    """Serve ``db`` over HTTP with uvicorn (``pip install seekbase[server]``).
-    Blocking — call from a launch script."""
-    try:
-        import uvicorn
-    except ModuleNotFoundError as e:  # pragma: no cover
-        raise ModuleNotFoundError(
-            "serve() needs uvicorn: pip install 'seekbase[server]'"
-        ) from e
-    uvicorn.run(create_app(db, api_key=api_key), host=host, port=port)
+    """Convenience: serve ``db`` over HTTP. Blocking — call from a launch script.
+
+    The ASGI runner is external, not a seekbase dependency. Pass your own via
+    ``runner`` — any callable ``runner(app, host=..., port=...)`` (e.g.
+    ``uvicorn.run``). If omitted, uvicorn is used when importable; otherwise a
+    clear error points you at ``create_app(db)`` to run under any ASGI server.
+    """
+    app = create_app(db, api_key=api_key)
+    if runner is None:
+        try:
+            import uvicorn
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "serve() needs an ASGI runner. Either `pip install uvicorn`, or "
+                "pass runner=..., or run `create_app(db)` under your own ASGI server."
+            ) from e
+        runner = uvicorn.run
+    runner(app, host=host, port=port)

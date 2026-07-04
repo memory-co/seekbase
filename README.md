@@ -16,11 +16,10 @@
 ## 安装
 
 ```bash
-pip install seekbase            # 嵌入 + HTTP 客户端 + ApiEmbedder,开箱即用
-pip install 'seekbase[server]'  # + uvicorn,用于把端口跑成一个 HTTP 服务
+pip install seekbase   # 嵌入 + HTTP 客户端 + server(create_app)+ ApiEmbedder,全部开箱即用
 ```
 
-HTTP **客户端**(`Seekbase.connect`)只需要核心依赖(httpx 已在核心里)。`[server]` extra 只给**对外提供服务**的那个进程用。
+两种形态都是标配、无需任何 extra:嵌入、HTTP 客户端(`Seekbase.connect`)、以及把端口暴露成 HTTP 服务的 `create_app(db)`——它是一个**零依赖的手写 ASGI app**。跑这个 app 的 **ASGI runner 由你从外部注入**(uvicorn / hypercorn / gunicorn,或挂进已有应用),seekbase 不绑定 runner。
 
 ## 嵌入形态(进程内)
 
@@ -52,18 +51,19 @@ await db.close()
 
 ## 服务形态(HTTP)
 
-先起一个 server——它持有 schema(以及将来的 embedder),并拥有数据目录:
+起一个 server——它持有 schema(以及将来的 embedder),并拥有数据目录。`create_app(db)` 给你一个裸 ASGI app,用**你自己的 runner** 跑:
 
 ```python
-# serve.py
+# serve.py —— 用外部注入的 runner(这里是 uvicorn)
+import uvicorn
 from seekbase import Seekbase
-from seekbase.server import serve
+from seekbase.server import create_app
 
 db = await Seekbase.open("./data", schema=SCHEMA)        # 就是上面那个嵌入 db
-serve(db, host="0.0.0.0", port=8000, api_key="secret")  # 阻塞运行;需要 seekbase[server]
+uvicorn.run(create_app(db, api_key="secret"), host="0.0.0.0", port=8000)
 ```
 
-如果你想用自己的 ASGI server(uvicorn/hypercorn/…)跑、或把它挂进一个更大的应用里,`create_app(db)` 会返回一个裸 ASGI app。
+也有个便捷函数 `serve(db, host=…, port=…, api_key=…, runner=…)`:`runner` 是任意 `runner(app, host=…, port=…)` 可调用(默认用 uvicorn,前提是你装了它)。runner 始终由外部提供,seekbase 不把它作为依赖。
 
 然后从任何地方连它——**调用代码和嵌入形态一模一样**,只有拿句柄这一步不同:
 

@@ -96,6 +96,23 @@ async def test_auth_required(tmp_path):
     await server_db.close()
 
 
+async def test_serve_runner_is_injected(tmp_path):
+    # the ASGI runner is external — serve() calls whatever runner you pass,
+    # so no uvicorn (or any runner dependency) is needed to drive it.
+    from seekbase.server import serve
+
+    server_db = await Seekbase.open(tmp_path / "db", schema=SCHEMA)
+    captured = {}
+
+    def fake_runner(app, *, host, port):
+        captured["host"], captured["port"] = host, port
+        captured["callable"] = callable(app)
+
+    serve(server_db, host="1.2.3.4", port=9999, runner=fake_runner)
+    assert captured == {"host": "1.2.3.4", "port": 9999, "callable": True}
+    await server_db.close()
+
+
 async def test_health(tmp_path):
     server_db = await Seekbase.open(tmp_path / "db", schema=SCHEMA)
     app = create_app(server_db)
