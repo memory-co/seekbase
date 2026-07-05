@@ -8,6 +8,7 @@
 
 | 目录 | 测什么 |
 |---|---|
+| [`quickstart/`](quickstart/) | 最基础的本地用法(端到端):开库 → 写 → 查 → 删 → 再查,不起 server、不需 embedder;含关库重开数据仍在 |
 | [`basic_orm/`](basic_orm/) | 核心 `insert` / `select` / `count` round-trip + 过滤/排序/分页 + 默认 select 带 `created_at` + 上下文管理器 |
 | [`insert_only/`](insert_only/) | `delete()` 只打墓碑:正常查询看不到、但行物理还在(raw SQL 能看到 `deleted_at`);没有 update 路径 |
 | [`time_machine/`](time_machine/) | `as_of` 连接只读 + 把世界回退到那个时刻(嵌入形态) |
