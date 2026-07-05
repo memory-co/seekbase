@@ -28,7 +28,7 @@
 |---|---|---|
 | `sql` | 是 | 一条只读语句(`SELECT` / `WITH` 开头);非只读 → `ReadOnlyError` |
 | `params` | 否 | 位置参数,填充 `sql` 里的 `?`(参数绑定,防注入);默认 `[]` |
-| `as_of` | 否 | ISO-8601 时刻;非 null → 整条查询只见那时及之前存在的行(时光机) |
+| `as_of` | 否 | 日期 `YYYYMMDD`;非 null → 只读 `ds <= as_of` 的分区,回到那天(时光机,见下) |
 
 ### 响应
 
@@ -81,15 +81,17 @@
 
 ---
 
-## 时光机 `as_of`
+## 时光机 `as_of`(日期分区)
 
-`as_of` 给一个 ISO-8601 时刻,整条查询回退到那时:只见那时刻及之前建、且当时还没删的行。`search()` 也一并回退——检索的是「当时存在的向量」。
+时光机用**日期分区**实现:每行带一个引擎代管的分区列 `ds`(写入日,`YYYYMMDD`)。`as_of` 给一个日期,整条查询只读 `ds <= as_of` 的分区——回到那天的世界。这是**分区裁剪**,扫描量随时间窗收敛;`search()` 一并按 `ds` 裁剪。
 
 ```json
-{"sql": "SELECT * FROM cards WHERE kind = 'issue'", "as_of": "2026-06-01T00:00:00Z"}
+{"sql": "SELECT * FROM cards WHERE kind = 'issue'", "as_of": "20260601"}
 ```
 
-- 一个 server 能同时服务各自 `as_of` 的多个请求(`as_of` 是 per-request 的)。
+- 也可在 SQL 里**直接用 `ds` 列**:`WHERE ds = '20260605'`(就看那一天)、`WHERE ds BETWEEN '20260601' AND '20260607'`(一周)。`as_of` 只是「`ds <= D`」的便捷写法。
+- 粒度到**天**(离线大数据惯例);日内更细由 `created_at` 列做二级过滤。
+- 一个 server 能同时服务各自 `as_of` 的多个请求(per-request)。
 
 ---
 
@@ -97,4 +99,4 @@
 
 - 普通结构化 SQL 查询:✅ 可用。
 - `search()`:`[M3]` 向量引擎落地前调用 → `501 NotSupportedYet`。
-- `as_of` 对 raw SQL 的回退:`[M4]` 需 as-of 视图注册,当前直查看到的是当前态(ORM 侧的等值/范围查询已回退)。
+- `ds` 日期分区与 `as_of` 裁剪:`[M4]`,当前未分区、看到的是当前态。

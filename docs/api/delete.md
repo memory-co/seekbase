@@ -47,7 +47,7 @@ await db.wait(ticket)
 
 ### 副作用
 
-- 给匹配的存活行写 `deleted_at`(唯一一次引擎代管的重写);`[M2]` 文件镜像里同步写回 `deleted_at` / 追加墓碑记录。
+- 记一条带 `ds`(删除日)的**墓碑**:canonical 文件在**当天分区追加**一条删除记录、**不回改原文件**;派生的 DuckDB 行一并置 `deleted_at`(见 [`../works/store.md` §5](../works/store.md))。时光机据分区裁剪,as-of 早于删除日仍见该行。
 - 已经是墓碑的行不再重复打。
 
 ### 错误

@@ -86,7 +86,7 @@ seekbase/                      # 仓库根
       files.py                 # FileMirror:json / jsonl 三写、原子落盘、read_json 桥  [M2]
       outbox.py                # Outbox(DuckDB 表)+ Consumer(进程内协程)  [M3]
       planner.py               # 查询规划:search()+谓词组合、过滤下推、as-of 改写  [M3]
-      asof.py                  # 时光机:谓词改写 / 视图注册 / 只读闸  [M4]
+      asof.py                  # 时光机:ds 日期分区裁剪 / 只读闸  [M4]
     embedders/
       __init__.py              # Embedder 协议再导出
       api.py                   # 默认 ApiEmbedder(OpenAI 兼容 /embeddings,async httpx,核心自带)  [M1 已落]
@@ -225,7 +225,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 <data_dir>/                       # 一个 Seekbase 实例 = 一个目录(拷走=完整备份)
   duck.db                         # DuckDB 单文件:业务行 + _outbox 表 + _meta
   lance/                          # LanceDB:每个有 searchable 列的表一个 collection
-  files/                          # 文件镜像(canonical):cards/*.json, sessions/**/rounds.jsonl
+  files/                          # 文件镜像(canonical):顶层按 ds=YYYYMMDD 日期分区,内 cards/*.json 等
   _meta.json                      # 实例元:schema 指纹、seekbase 版本、embedder dim
 ```
 
@@ -284,14 +284,17 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 - **file 面无锁、不经 executor**:`grep`/`cat`/`diff` 直接读文件树,不占 DuckDB 连接、不被写入阻塞(靠 insert-only + 原子落盘兜底)。
 - v1 单连接串行化优先做对;并发读优化(多短读连接)列 §10。
 
-### 6.5 时光机(`asof.py` + planner 复用)
+### 6.5 时光机 = 日期分区(`ds`)
 
-- 行级两列引擎自动维护:`created_at`(写入时)+ `deleted_at`(墓碑)。
-- `open(as_of=T)` → **只读连接**;planner 把每张表换成 as-of 视图谓词 `created_at <= T AND (deleted_at IS NULL OR deleted_at > T)`;ORM/SQL 一字不改,世界回到 T。
-- SQL 面:as-of 下**注册同名 DuckDB 视图**,`db.sql(...)` 自动只见 T 前世界。
-- `search()` 同样回溯(as-of 作 Lance pre-filter)。写被 `ReadOnlyError` 挡住。
-- **as-of 对所有列严谨**:引擎焊死 insert-only,不存在被后来 update 污染的历史——严谨性靠结构、不靠自觉。
-- 代价:墓碑常驻 = 空间换历史;`vacuum(before=T)` 显式丢史(行+向量+文件一起清)。
+时光机用**离线大数据那套分区**实现,不靠谓词改写:每行带一个引擎自动维护的日期分区列 `ds`(写入日,格式 `YYYYMMDD`,如 `ds=20260705`)。
+
+- **机制 = 分区裁剪**:`open(as_of=D)`(或 `query` 的 `as_of` 参)→ **只读**,只读 `ds <= D` 的分区。回到 D 就是「把这天及之前的分区读齐」,天然是分区裁剪(partition pruning),扫描量随时间窗收敛,不是全表加谓词。
+- **文件即分区**:文件镜像用 `ds=YYYYMMDD` 做**顶层目录**(见 §6.6 / [works/store.md](docs/works/store.md)),`ls files/ds=20260705/` 就是当天全部数据——审计 / 备份 / 「回看某天」都落到「看一个目录」。
+- **粒度 = 天**:as-of 精度到日(offline 惯例);要日内更细,分区键内仍保留 `created_at` 做二级过滤。
+- **删除同为带 `ds` 的记录**:`delete` 打墓碑也是一次写、落当天分区;as-of D 裁掉 `ds > D` 的分区,晚于 D 的删除天然不可见——删除的时光机由分区一并兜住,不需额外谓词。
+- `search()` 同样按 `ds` 分区裁剪(向量侧按分区/`ds` 字段 pre-filter);写被 `ReadOnlyError` 挡住。
+- **严谨性靠 insert-only + 分区**:每天分区一旦过去就不再变(墓碑是新分区里的新记录),不存在被后来 update 污染的历史。
+- 代价:历史分区常驻 = 空间换历史;`vacuum(before=D)` 显式丢史 = **整块删掉 `ds < D` 的分区目录**(行+向量+文件),比逐行清墓碑更干脆。
 
 ### 6.6 rebuild / repair
 
@@ -321,7 +324,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 | **M1 骨架 + 结构化 + 两形态** | 包骨架、pyproject、schema 解析、DuckdbEngine、ORM(select/insert/delete/count)、SQL 直查、async 桥、部分 as-of;**执行器抽象 + server 形态(open/connect,ASGI app,HTTP client)** | 嵌入 + server 两形态都能用 |
 | **M2 文件镜像** | FileMirror(json/jsonl、原子落盘、read_json 桥)、三写顺序、rebuild/repair | file-canonical 立住 |
 | **M3 向量 + search** | 吸收 searchbase→VectorEngine、Outbox+Consumer、planner 下推、`search()`、`flush()` | 语义查询上线 |
-| **M4 时光机** | created_at/deleted_at、as-of 视图+改写、只读闸、vacuum | 时光机严谨 |
+| **M4 时光机** | `ds` 日期分区、as-of 分区裁剪、只读闸、vacuum(整块删分区) | 时光机严谨 |
 | **M5 打磨** | `ApiEmbedder`(核心自带)、README、契约测试补全、错误信息、`_meta` schema 指纹 | 可发 PyPI |
 
 一次交付 = M1→M5 全落;里程碑只为内部可验收切分。
