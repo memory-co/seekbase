@@ -13,7 +13,7 @@ Insert    POST  /v1/insert             写(异步):提交要写的行,返 ticket
 Delete    POST  /v1/delete             写(异步):按条件打墓碑,返 ticket             → delete.md
 Writes    GET   /v1/writes/{ticket}    查一次写入的状态(pending/done/failed)         → insert.md
 Rebuild   POST  /v1/rebuild            从文件重建派生层(异步),返 ticket             → admin.md
-Vacuum    POST  /v1/vacuum             物理清墓碑 / 丢历史(异步),返 ticket           → admin.md
+Vacuum    POST  /v1/vacuum             按行清死行 / 丢历史(异步),返 ticket           → admin.md
 Health    GET   /v1/health             健康:{"ready": bool}                          → admin.md
 ```
 

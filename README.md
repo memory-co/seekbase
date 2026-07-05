@@ -11,7 +11,7 @@
 
 两种形态的**调用代码逐字节相同**——`query(sql)` / `insert` / `delete` 一个字都不用改,变的只有你怎么拿到 `db` 句柄。
 
-> **状态:M1–M3 已落。** SQL `query`(结构化 + 语义 `search()` + `ds` 时间窗)、异步 ticket 写(`insert`/`delete`)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、向量侧(LanceDB + outbox consumer)、两种使用形态,今天都能跑。`vacuum`(M4)待落。完整设计见 [DESIGN.md](DESIGN.md)。
+> **状态:M1–M4 已落(核心完整)。** SQL `query`(结构化 + 语义 `search()` + `ds` 时间窗)、异步 ticket 写(`insert`/`delete`)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、向量侧(LanceDB + outbox consumer)、`vacuum`(按行清死行)、两种使用形态,今天都能跑。完整设计见 [DESIGN.md](DESIGN.md)。
 
 ## 安装
 

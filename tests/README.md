@@ -16,6 +16,7 @@
 | [`time_machine/`](time_machine/) | `ds_start`/`ds_end` 时间窗:时光机回退、区间、只读闸、ds 格式校验 |
 | [`schema/`](schema/) | SCHEMA 校验(list 形态:table/columns/primary/类型/decimal)+ 未知列被拒 + searchable 须 str + 需 embedder + 高级类型 DDL round-trip |
 | [`server/`](server/) | server 形态:同一套调用走 HTTP、错误保型过线(含 `NotFound`)、鉴权、health、runner 外部注入 |
+| [`vacuum/`](vacuum/) | `vacuum` 按行清 `deleted_ds < before` 的死行:活行不动、历史从文件消失、rebuild 不复活、ds 格式校验 |
 | [`embedder_live/`](embedder_live/) | **真实 embedding API** 端到端(需环境变量 `QWEN_KEY` + `SEEKBASE_EMBED_URL`,默认 skip)|
 
 ## 共享 fixture / helper(`conftest.py`)

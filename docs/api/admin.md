@@ -19,34 +19,33 @@
 
 ---
 
-## POST /v1/vacuum — 丢历史 `[M4]`
+## POST /v1/vacuum — 丢历史 ✅
 
-物理清 `before` 之前的墓碑(行 + 向量 + 文件)。**唯一会真正物理删的动作**,明说这是在丢历史。异步,返回 `ticket`。
+**按行**物理清 `deleted_ds < before` 的**死行**(DuckDB 行 + 文件里那些行的全部事件 + 向量)。**唯一真正物理删的动作**,明说这是在丢历史;**不是**整块删分区(活行、删于 `≥ before` 的行都保留)。见 [`../works/time_machine.md` §8](../works/time_machine.md)。异步,返回 `ticket`。
 
-**函数形态**:`ticket = await db.vacuum(before="2026-06-01T00:00:00Z"); await db.wait(ticket)`
+**函数形态**:`ticket = await db.vacuum(before="20260601"); st = await db.wait(ticket)`
 
 ### 请求体
 
 ```json
-{"before": "2026-06-01T00:00:00Z"}
+{"before": "20260601"}
 ```
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `before` | 是 | ISO-8601;清掉 `deleted_at < before` 的墓碑 |
+| `before` | 是 | `YYYYMMDD`;清掉 `deleted_ds < before` 的死行 |
 
 ### 响应
 
 ```json
-202 {"ticket": "wr_…", "state": "pending"}
+200 {"ticket": "wr_…", "op": "vacuum", "state": "done", "stats": {"purged": 3}}
 ```
 
 ### 错误
 
 | 情况 | 状态 / type |
 |---|---|
-| 缺 `before` / 非 ISO-8601 | 400 `QueryError` |
-| M1 未实现 | 501 `NotSupportedYet` |
+| 缺 `before` / 非 `YYYYMMDD` | 400 `QueryError` |
 
 ---
 

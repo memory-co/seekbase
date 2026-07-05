@@ -4,7 +4,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from seekbase import NotFound, NotSupportedYet, QueryError, ReadOnlyError, SeekbaseError
+from seekbase import NotFound, QueryError, ReadOnlyError, SeekbaseError
 from seekbase.server import seekbase_server, serve
 from tests.conftest import client_for, open_db
 
@@ -39,8 +39,8 @@ async def test_error_types_propagate(pair):
         await client.query("SELECT * FROM nope")           # unknown table -> 400
     with pytest.raises(NotFound):
         await client.write_status("wr_missing")            # unknown ticket -> 404
-    with pytest.raises(NotSupportedYet):
-        await client.vacuum(before="20260101")             # M4 -> 501
+    with pytest.raises(QueryError):
+        await client.vacuum(before="2026-01-01")           # bad ds format -> 400
 
 
 async def test_wrong_api_key_rejected(tmp_path):

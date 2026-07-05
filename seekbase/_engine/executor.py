@@ -15,7 +15,7 @@ import contextlib
 import uuid
 from typing import Any
 
-from .._types import NotFound, NotSupportedYet, QueryError
+from .._types import NotFound, QueryError
 from .bridge import Bridge
 from .duck import DuckdbEngine, _DS_RE, extract_search, search_target
 from .plan import Request
@@ -69,7 +69,13 @@ class LocalExecutor:
         if op == "vacuum":
             if not req.before or not _DS_RE.match(req.before):
                 raise QueryError("vacuum needs before=YYYYMMDD")
-            raise NotSupportedYet("vacuum() lands with the time machine (M4)")
+            dead = await self._duck.vacuum(req.before)
+            if self._vector is not None:
+                for tbl, pks in dead.items():
+                    for pk in pks:
+                        await self._vector.delete(tbl, pk)
+            stats = {"purged": sum(len(v) for v in dead.values())}
+            return await self._ticket_result(_new_ticket(), "vacuum", {"stats": stats})
         raise QueryError(f"unknown op {op!r}")
 
     async def _run_query(self, req: Request) -> list[dict]:
