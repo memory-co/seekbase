@@ -32,13 +32,19 @@ SCHEMA = {
 - 有 `searchable` 列 ⇒ **必须注入 embedder**,否则 `open` 时 `EmbedderInvalid`。
 - 没有 `searchable` 列的表 = 纯 DuckDB 表,**零向量开销**。
 
-## `files`(本地镜像声明)
-
-- 字符串 = json 模式:`"cards/{card_id}.json"`(路径模板,列值填充,一行一文件)。
-- 字典 = 显式模式:`{"path": "...", "mode": "json" | "jsonl"}`;`jsonl` 用于 append-only 大表(一行一条追加)。
+- 字符串 = 一行一文件(json):`"cards/{card_id}.json"`(路径模板,列值填充)。
+- 字典 = 显式模式:`{"path": "...", "mode": "json" | "jsonl"}`。
 - 模板里的 `{占位符}` 必须是**已声明的列**。
 - 没声明 `files` 的表 = 无镜像(纯派生/日志表不落盘)。
-- 目录结构与三写顺序见 [works/store.md](../works/store.md)。
+
+**json 还是 jsonl,由 schema 声明,不由 seekbase 猜**——seekbase 业务无关,不知道某张表「是流水所以该追加」。判据是**结构性**的、也是正确性条件:
+
+| 模式 | 路径模板 vs 行 | 模板里的键 | 为什么 |
+|---|---|---|---|
+| json(一行一文件) | 1:1 | **主键** | per-row 文件须唯一定位,否则两行撞一个文件 |
+| jsonl(追加) | 1:多 | **非主键分组列** | 键不唯一 → 同路径来多行 → 只能 append |
+
+> 一句话:**模板里放主键就是 json,放分组键就是 jsonl**。这从 schema 结构就能推出,与业务无关。详见 [works/store.md](../works/store.md)。
 
 ## 校验规则(`seekbase.schema.parse_schema`)
 
