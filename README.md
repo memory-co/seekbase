@@ -87,7 +87,7 @@ await db.close()
 ## 文档
 
 - [DESIGN.md](DESIGN.md) —— 整体设计
-- [docs/api/](docs/api/) —— API 参考(一类接口一个 md,函数形态 + HTTP 形态都注明)
+- [docs/api/](docs/api/) —— API 参考(query / insert / delete / admin / setup,每个接口的请求·响应·错误)
 - [docs/works/](docs/works/) —— 专题设计:[store.md](docs/works/store.md)(三写形态 files/DuckDB/LanceDB)
 
 Apache-2.0。
