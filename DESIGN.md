@@ -82,10 +82,10 @@ seekbase/                      # 仓库根
       executor.py              # LocalExecutor(→DuckDB)/ HttpExecutor(→HTTP),两形态的接缝  [M1 已落]
       duck.py                  # DuckdbEngine:单写者连接、DDL、SQL 编译执行、as-of 可见性
       bridge.py                # async↔sync 桥(单线程 executor,串行化 DuckDB)  [M1 已落]
-      vector.py                # VectorEngine:LanceDB 管理(吸收 searchbase.local)  [M3]
+      vector.py                # VectorEngine:LanceDB(embed/ANN by pk)  [M3 已落]
       files.py                 # FileMirror:按天分区、每表 <表>.jsonl append + rebuild replay  [M2 已落]
-      outbox.py                # Outbox(DuckDB 表)+ Consumer(进程内协程)  [M3]
-      planner.py               # 查询规划:search()+谓词组合、过滤下推、as-of 改写  [M3]
+      outbox.py                # (已并入 duck.py `_sb_outbox` + executor consumer)  [M3 已落]
+      # search() 重写在 duck.py(extract_search)+ executor(向量检索→join)  [M3 已落]
       asof.py                  # 时光机:ds 日期分区裁剪 / 只读闸  [M4]
     embedders/
       __init__.py              # Embedder 协议再导出
@@ -97,6 +97,7 @@ seekbase/                      # 仓库根
     quickstart/                # 最基础端到端:开库→写→查→删→再查
     read_write/                # SQL query 读 + 异步 insert/delete round-trip
     file_mirror/               # 文件镜像:写落 jsonl、删是 append 墓碑、rebuild 重灌
+    search/                    # SQL 里的 search():排序、结构化/时间窗组合、删后搜不到
     insert_only/               # delete 只打墓碑、无 update 路径
     time_machine/              # ds_start/ds_end 时间窗 + 只读闸(嵌入)
     schema/                    # SCHEMA 校验(list 形态)+ 未知列拒 + searchable 需 embedder
@@ -310,7 +311,7 @@ class NotFound(SeekbaseError): ...              # ticket 不存在 → 404
 |---|---|---|
 | **M1 骨架 + 结构化 + 两形态** | 包骨架、pyproject、schema 解析、DuckdbEngine、ORM(select/insert/delete/count)、SQL 直查、async 桥、部分 as-of;**执行器抽象 + server 形态(open/connect,ASGI app,HTTP client)** | 嵌入 + server 两形态都能用 |
 | **M2 文件镜像 ✅** | FileMirror(按天分区 / 每表 jsonl append)、文件最先写序、`rebuild` replay | file-canonical 立住 |
-| **M3 向量 + search** | 吸收 searchbase→VectorEngine、Outbox+Consumer、planner 下推、SQL 里的 `search()` | 语义查询上线 |
+| **M3 向量 + search ✅** | VectorEngine(LanceDB)、`_sb_outbox` + consumer、SQL 里的 `search()`→`_score` join | 语义查询上线 |
 | **M4 时光机** | `ds`/`deleted_ds` 日期分区、as-of 分区裁剪、vacuum(按行清死行) | 时光机严谨 |
 | **M5 打磨** | `ApiEmbedder`(核心自带)、README、契约测试补全、错误信息、`_meta` schema 指纹 | 可发 PyPI |
 

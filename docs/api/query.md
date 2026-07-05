@@ -109,8 +109,8 @@
 
 ---
 
-## M1 现状
+## 现状
 
 - 普通结构化 SQL 查询:✅ 可用。
-- `search()`:`[M3]` 向量引擎落地前调用 → `501 NotSupportedYet`。
-- `ds` 日期分区与 `ds_start`/`ds_end` 裁剪:`[M4]`,当前未分区、看到的是当前态。
+- `search()`(LanceDB 向量检索 + `_score`,与结构化过滤 / 时间窗组合):**✅ 可用(M3)**。向量由后台 consumer 从 outbox 异步兑现,`wait(ticket)` 排干后可搜到。
+- `ds_start` / `ds_end` 时间窗按 `ds` 列裁剪:✅ 可用(可见性视图);顶层文件物理分区目录 M2 已落。

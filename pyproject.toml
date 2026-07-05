@@ -8,12 +8,12 @@ license = { file = "LICENSE" }
 authors = [{ name = "seekbase" }]
 keywords = ["duckdb", "lancedb", "orm", "vector-search", "embedded-database"]
 dependencies = [
-    "duckdb>=1.1",
+    "duckdb>=1.1",       # structured/analytical engine
+    "lancedb>=0.13",     # vector engine (search()); loaded only when a schema has searchable cols
     "pydantic>=2",
-    "httpx>=0.27",    # HTTP client (Seekbase.connect) + default embedder (ApiEmbedder)
-    # server is standard via create_app() — a zero-dep hand-rolled ASGI app.
+    "httpx>=0.27",       # HTTP client (Seekbase.connect) + default embedder (ApiEmbedder)
+    # server is standard via seekbase_server() — a zero-dep hand-rolled ASGI app.
     # The ASGI *runner* (uvicorn/hypercorn/…) is injected by the host, not bundled.
-    # NOTE: lancedb is added in M3 (vector engine). M1 is pure DuckDB.
 ]
 
 [project.optional-dependencies]

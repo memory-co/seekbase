@@ -42,13 +42,20 @@ class Seekbase:
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         parsed = parse_schema(schema)
-        if any(t.searchable for t in parsed.tables) and embedder is None:
+        has_searchable = any(t.searchable for t in parsed.tables)
+        if has_searchable and embedder is None:
             raise EmbedderInvalid(
                 "schema declares searchable columns but no embedder was provided"
             )
         bridge = Bridge()
         duck = await DuckdbEngine.open(data_dir, parsed, bridge)
-        return cls(LocalExecutor(bridge, duck))
+        vector = None
+        if has_searchable:
+            from ._engine.vector import VectorEngine
+            vector = await VectorEngine.create(data_dir / "lance", embedder, parsed)
+        executor = LocalExecutor(bridge, duck, vector)
+        await executor.start()
+        return cls(executor)
 
     @classmethod
     async def connect(

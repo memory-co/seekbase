@@ -9,9 +9,9 @@
 | **嵌入(embedded)** | `Seekbase.open(dir, schema=…)` | 进程内、DuckDB | 单进程、本地优先、零运维 |
 | **服务(server)** | `Seekbase.connect(url)` → 连一个运行中的 server | HTTP | 多客户端 / 多进程共享同一个实例 |
 
-两种形态的**调用代码逐字节相同**——`table().select()…` 链和 `search()` 一个字都不用改,变的只有你怎么拿到 `db` 句柄。
+两种形态的**调用代码逐字节相同**——`query(sql)` / `insert` / `delete` 一个字都不用改,变的只有你怎么拿到 `db` 句柄。
 
-> **状态:早期骨架(M1)。** 结构化 ORM(`select` / `insert` / 墓碑式 `delete` / `count`)、只读 SQL 直查、部分 as-of 时光机,**以及两种使用形态**,今天都能跑。向量 `search()`、outbox、文件镜像、`rebuild()` 和 `vacuum()` 在后续里程碑落地。完整设计见 [DESIGN.md](DESIGN.md)。
+> **状态:M1–M3 已落。** SQL `query`(结构化 + 语义 `search()` + `ds` 时间窗)、异步 ticket 写(`insert`/`delete`)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、向量侧(LanceDB + outbox consumer)、两种使用形态,今天都能跑。`vacuum`(M4)待落。完整设计见 [DESIGN.md](DESIGN.md)。
 
 ## 安装
 
@@ -88,7 +88,7 @@ await db.close()
 
 - **只增、引擎强制**:没有 `update`/`upsert`;`delete()` 只写一列 `deleted_at` 墓碑。历史因此诚实——时光机对**所有列**都严谨。
 - **业务无关**:不认识任何业务概念、不读任何 config——由你注入 `data_dir`、`schema`,以及(要 search 时)一个 `embedder`。
-- **调用方永远不见向量**:声明 `searchable` 列;`search(text)` 自动 embed + 检索 + 在同一条链上和结构化过滤组合。
+- **调用方永远不见向量**:声明 `searchable` 列;SQL 里 `search('text')` 自动 embed + 检索 + 在同一条 SQL 里和结构化过滤组合。
 
 ## 文档
 

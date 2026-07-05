@@ -85,4 +85,4 @@ await db.wait(ticket)                   # 或阻塞到 done / failed
 
 - 提交 / 查状态接口:✅ 可用。
 - **文件镜像(M2)✅**:`insert` 先 append 进 `<表>.jsonl`,再写 DuckDB 行;`rebuild` 能从文件重灌(见 [admin.md](admin.md))。
-- **写目前同步兑现**:向量侧(outbox + LanceDB)在 `[M3]`;当前 `insert` 落库后即返回 `state: "done"` 的 ticket——异步骨架已立,向量异步兑现随 M3 接上,接口不变。
+- **向量侧异步(M3)✅**:`insert` 把 searchable 列的 embed 作业入 outbox,后台 consumer 异步兑现(embed → LanceDB);ticket 在向量作业排干前是 `pending`,`wait` 到 `done` 后 `search()` 能搜到。无 searchable 列的表 ticket 立即 `done`。

@@ -37,10 +37,20 @@ SCHEMA = [
 
 
 class FakeEmbedder:
-    dim = 8
+    """Deterministic bag-of-chars embedder: different texts → different
+    directions, identical text → identical vector (so ANN has real signal),
+    zero dependencies / no network."""
+
+    dim = 16
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return [[float(len(t))] * self.dim for t in texts]
+        out = []
+        for t in texts:
+            v = [0.0] * self.dim
+            for ch in t:
+                v[ord(ch) % self.dim] += 1.0
+            out.append(v if any(v) else [1.0] + [0.0] * (self.dim - 1))
+        return out
 
 
 async def open_db(data_root, *, schema=SCHEMA, embedder="fake"):
