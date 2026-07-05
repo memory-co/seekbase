@@ -30,6 +30,7 @@ packages = ["seekbase"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+python_files = ["test_*.py", "test.py"]   # scenarios live in <name>/test.py
 
 [tool.ruff]
 line-length = 100

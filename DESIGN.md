@@ -91,10 +91,17 @@ seekbase/                      # 仓库根
       __init__.py              # Embedder 协议再导出
       api.py                   # 默认 ApiEmbedder(OpenAI 兼容 /embeddings,async httpx,核心自带)  [M1 已落]
       # TODO: sentence_transformer.py  # 本地模型 embedder,后续做(§10)
-  tests/
-    test_m1_orm.py             # 嵌入形态:ORM / 墓碑 / SQL / as-of / schema 校验
-    test_m1_server.py          # server 形态:同一条链走 HTTP(in-process ASGITransport)
+  tests/                       # 按场景组织(照 memory.talk):每个子目录 = 一个场景
+    conftest.py                # 共享 fixture/helper:db / pair / open_db / FakeEmbedder
+    README.md                  # 场景一览表 + 加新场景的规矩
+    basic_orm/                 # 核心结构化读写 round-trip(README.md + test.py)
+    insert_only/               # delete 只打墓碑、无 update 路径
+    time_machine/              # as-of 回退 + 只读闸(嵌入)
+    schema/                    # SCHEMA 校验 + 未知列拒 + searchable 需 embedder
+    server/                    # server 形态:同一条链走 HTTP(in-process ASGITransport)
 ```
+
+> **测试组织照 memory.talk 的「按场景」路数**:每个场景一个目录,内含 `README.md`(测什么 / 不测什么 / fixture 来源)+ `test.py`;`python_files` 收 `test.py`。相关用例合并到一个场景下,跟「按代码模块切文件」解耦。
 
 **与 searchbase 的映射**:`searchbase/local/{backend,index,maintenance,util}.py` 那摊(embed、ANN、auto_split、超长截断、压缩/EMFILE 恢复、维护协程)**整体下沉**为 `_engine/vector.py`(可拆子模块)。searchbase 的端口 `SearchBackend` **不再对外**——上层只 import `seekbase.Seekbase`。
 
@@ -294,6 +301,8 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 ---
 
 ## 7. 测试策略
+
+**组织:按场景**(照 memory.talk)——每个场景一个目录(`tests/<name>/`),内含 `README.md`(测什么 / 不测什么 / fixture 来源)+ `test.py`;共享 fixture/helper 收在 `tests/conftest.py`(`db` / `pair` / `open_db` / `FakeEmbedder`)。M1 已落五个场景:`basic_orm` / `insert_only` / `time_machine` / `schema` / `server`。
 
 - **契约测试**(核心):黑盒打端口——open→insert→select/search→delete→as-of→flush→rebuild→vacuum,断言 `file ≥ row ≥ vector` 与时光机语义。用一个**假 embedder**(确定性 hash→向量,零依赖),不碰真模型。
 - **崩溃/重放**:在 ①②③ 各步之间人为中断,重开断言收敛(outbox replay + repair)。
