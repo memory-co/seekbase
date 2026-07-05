@@ -72,13 +72,12 @@ serve(db, host="0.0.0.0", port=8000, api_key="secret", runner=None)
 
 ## 3. 声明 schema
 
-表结构声明一次,DDL / 双引擎同步 / 文件镜像全由 seekbase 管。`open` / server 启动时校验一次——**坏形状当场报错**。
+表结构声明一次,DDL / 双引擎同步 / 文件镜像全由 seekbase 管。`open` / server 启动时校验一次——**坏形状当场报错**。设计与推导(一处声明 → 三引擎)见 [`../works/schema.md`](../works/schema.md)。
 
 ```python
 SCHEMA = {
     "cards": {
-        "columns": {"card_id": "str primary", "issue": "str",
-                    "kind": "str", "created_at": "str"},
+        "columns": {"card_id": "str primary", "issue": "str", "kind": "str"},
         "searchable": ["issue"],                 # 可 search() 的列(写入自动 embed)
         "files": "cards/{card_id}.json",         # 本地 JSON 镜像(可 grep)
     },

@@ -28,8 +28,7 @@ from seekbase import Seekbase
 
 SCHEMA = {
     "cards": {
-        "columns": {"card_id": "str primary", "issue": "str",
-                    "kind": "str", "created_at": "str"},
+        "columns": {"card_id": "str primary", "issue": "str", "kind": "str"},
         "searchable": ["issue"],                 # (向量引擎落地后生效)
     },
 }
