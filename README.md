@@ -26,24 +26,31 @@ pip install seekbase   # 嵌入 + HTTP 客户端 + server(seekbase_server)+ ApiE
 ```python
 from seekbase import Seekbase
 
-SCHEMA = {
-    "cards": {
-        "columns": {"card_id": "str primary", "issue": "str", "kind": "str"},
+SCHEMA = [
+    {
+        "table": "cards",
+        "columns": [
+            {"name": "card_id", "type": "str"},
+            {"name": "issue",   "type": "str"},
+            {"name": "kind",    "type": "str"},
+        ],
+        "primary": "card_id",
         "searchable": ["issue"],                 # (向量引擎落地后生效)
     },
-}
+]
 
 db = await Seekbase.open("./data", schema=SCHEMA)
 
-await db.table("cards").insert({"card_id": "c1", "issue": "pty vs tmux", "kind": "issue"})
+# 写是异步的:返回 ticket,可 wait 到落库
+await db.wait(await db.insert("cards", {"card_id": "c1", "issue": "pty vs tmux", "kind": "issue"}))
 
-rows = await (db.table("cards")
-    .select("card_id", "issue")
-    .eq("kind", "issue")
-    .order("created_at", desc=True)
-    .limit(20))
+# 读是 SQL:结构化 + 时光机(ds_start/ds_end)+ 语义 search() 都在这一个接口
+rows = await db.query(
+    "SELECT card_id, issue FROM cards WHERE kind = ? ORDER BY created_at DESC LIMIT 20",
+    params=["issue"],
+)
 
-await db.table("cards").delete().eq("card_id", "c1")   # 打墓碑,永不物理删
+await db.delete("cards", where="card_id = ?", params=["c1"])   # 打墓碑,永不物理删
 
 await db.close()
 ```
@@ -69,13 +76,13 @@ uvicorn.run(seekbase_server(db, api_key="secret"), host="0.0.0.0", port=8000)
 ```python
 db = await Seekbase.connect("http://localhost:8000", api_key="secret")
 
-await db.table("cards").insert({"card_id": "c1", "issue": "pty vs tmux", "kind": "issue"})
-rows = await db.table("cards").select("card_id", "issue").eq("kind", "issue").limit(20)
+await db.wait(await db.insert("cards", {"card_id": "c1", "issue": "pty vs tmux", "kind": "issue"}))
+rows = await db.query("SELECT card_id, issue FROM cards WHERE kind = ?", params=["issue"])
 
 await db.close()
 ```
 
-查询链会被序列化成一个 `POST /v1/execute`,server 执行后返回行。**错误过线保型**(server 侧抛的 `ReadOnlyError`,client 侧还是 `ReadOnlyError`)。鉴权是一个可选的 bearer token;时光机只读也能走 HTTP(`Seekbase.connect(url, as_of="2026-06-01T00:00:00Z")`)。
+读走 `POST /v1/query`、写走 `POST /v1/insert`(异步 ticket)。**错误过线保型**(server 侧抛的 `ReadOnlyError`,client 侧还是 `ReadOnlyError`)。鉴权是一个可选的 bearer token;时光机走 `query(..., ds_end="20260601")`,HTTP 上一样。
 
 ## 设计原则
 

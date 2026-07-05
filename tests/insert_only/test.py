@@ -4,28 +4,26 @@ from __future__ import annotations
 from seekbase import Seekbase
 
 
-async def test_delete_is_a_tombstone_not_a_physical_delete(db):
-    """delete() marks deleted_at. The row vanishes from normal queries but
-    physically survives — history is never erased."""
-    await db.table("cards").insert({"card_id": "c1", "issue": "x", "kind": "k", "n": 1})
+async def test_delete_is_a_tombstone(db):
+    """delete() marks a tombstone: the row vanishes from query, and re-deleting
+    the same key matches nothing (it's no longer live — not physically gone-then-
+    absent, but already tombstoned)."""
+    await db.wait(await db.insert("cards", {"card_id": "c1", "issue": "x", "kind": "k", "n": 1}))
 
-    n = await db.table("cards").delete().eq("card_id", "c1")
-    assert n == 1
+    st = await db.wait(await db.delete("cards", where="card_id = ?", params=["c1"]))
+    assert st["matched"] == 1
 
-    # hidden from the normal read path...
-    assert await db.table("cards").count() == 0
-    assert await db.table("cards").select().eq("card_id", "c1") == []
+    # hidden from the normal read path
+    (c,) = await db.query("SELECT count(*) AS c FROM cards")
+    assert c["c"] == 0
 
-    # ...but the row is still on disk, carrying its tombstone
-    raw = await db.sql("SELECT card_id, deleted_at FROM cards")
-    assert len(raw) == 1
-    assert raw[0]["card_id"] == "c1"
-    assert raw[0]["deleted_at"] is not None
+    # re-deleting matches nothing: the row is already a tombstone, not re-live
+    st2 = await db.wait(await db.delete("cards", where="card_id = ?", params=["c1"]))
+    assert st2["matched"] == 0
 
 
 async def test_port_has_no_update_path(db):
-    """'改' is not a first-class op: the port exposes no update/upsert — the
-    only way values change is append + tombstone."""
-    assert not hasattr(db.table("cards"), "update")
-    assert not hasattr(db.table("cards"), "upsert")
+    """'改' is not first-class: the port exposes no update/upsert — values change
+    only by append (a new version) + tombstone."""
     assert not hasattr(Seekbase, "update")
+    assert not hasattr(Seekbase, "upsert")

@@ -52,12 +52,15 @@ class EmbedderInvalid(SeekbaseError):
 
 
 class ReadOnlyError(SeekbaseError):
-    """A write was attempted on a time-machine (``as_of``) connection, or
-    a non-read statement was passed to :meth:`Seekbase.sql`."""
+    """A non-read statement was passed to :meth:`Seekbase.query`."""
 
 
 class QueryError(SeekbaseError):
     """Malformed query — unknown table/column, or an unsupported operator."""
+
+
+class NotFound(SeekbaseError):
+    """A ticket (or other addressed object) does not exist. Maps to 404."""
 
 
 class NotSupportedYet(SeekbaseError):

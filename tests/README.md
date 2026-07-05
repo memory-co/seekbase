@@ -9,9 +9,9 @@
 | 目录 | 测什么 |
 |---|---|
 | [`quickstart/`](quickstart/) | 最基础的本地用法(端到端):开库 → 写 → 查 → 删 → 再查,不起 server、不需 embedder;含关库重开数据仍在 |
-| [`basic_orm/`](basic_orm/) | 核心 `insert` / `select` / `count` round-trip + 过滤/排序/分页 + 默认 select 带 `created_at` + 上下文管理器 |
+| [`read_write/`](read_write/) | SQL `query` 读 + 异步 `insert`/`delete`(ticket)round-trip:批量、参数化、`count`、重复主键 latest-wins |
 | [`insert_only/`](insert_only/) | `delete()` 只打墓碑:正常查询看不到、但行物理还在(raw SQL 能看到 `deleted_at`);没有 update 路径 |
-| [`time_machine/`](time_machine/) | `as_of` 连接只读 + 把世界回退到那个时刻(嵌入形态) |
+| [`time_machine/`](time_machine/) | `ds_start`/`ds_end` 时间窗:时光机回退、区间、只读闸、ds 格式校验 |
 | [`schema/`](schema/) | SCHEMA 校验(主键/保留列/类型/files 占位符)+ 未知列被拒 + searchable 列必须给 embedder + `search()` 已接受但 M3 才落 |
 | [`server/`](server/) | server 形态:同一条链走 HTTP、错误保型过线、`as_of` 只读在 HTTP 上也生效、鉴权、health、runner 外部注入 |
 

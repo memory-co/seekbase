@@ -74,40 +74,45 @@ serve(db, host="0.0.0.0", port=8000, api_key="secret", runner=None)
 
 表结构声明一次,DDL / 双引擎同步 / 文件镜像全由 seekbase 管。`open` / server 启动时校验一次——**坏形状当场报错**。设计与推导(一处声明 → 三引擎)见 [`../works/schema.md`](../works/schema.md)。
 
+**SCHEMA 是有序列表**(表名做 `table` 字段),列也是有序列表 `{name, type}`;主键单独走 `primary` 字段:
+
 ```python
-SCHEMA = {
-    "cards": {
-        "columns": {"card_id": "str primary", "issue": "str", "kind": "str"},
-        "searchable": ["issue"],                 # 可 search() 的列(写入自动 embed)
+SCHEMA = [
+    {
+        "table": "cards",
+        "columns": [
+            {"name": "card_id", "type": "str"},
+            {"name": "issue",   "type": "str"},
+            {"name": "kind",    "type": "str"},
+        ],
+        "primary": "card_id",
+        "searchable": ["issue"],                 # 可选:可 search() 的列(写入自动 embed)
     },
-    "rounds": {
-        "columns": {"session_id": "str", "idx": "int", "text": "str"},
-        "searchable": ["text"],
-    },
-}
+]
 ```
 
-**`columns`**
+**`columns`** —— 有序列表,每项 `{name, type}`:
 
-- 类型:`str` / `int` / `float` / `bool`;修饰 `primary`——**每表恰一个主键**。
+- 类型:`str` / `int` / `float` / `bool` / `decimal(p,s)` / `timestamptz` / `json`。
 - **声明式、不从首行推断**(避免首行 null 把列判成 string)。
-- `ds` / `created_at` / `deleted_ds` / `deleted_at` 是**引擎代管的元数据列**,自动加;**不许自己声明**。两对(创建 / 删除)日期字段:`ds`/`deleted_ds`(天,`YYYYMMDD`,分区 / 时光机判定)+ `created_at`/`deleted_at`(精确时刻)。完整设计见 [`../works/time_machine.md`](../works/time_machine.md)。
+- `ds` / `created_at` / `deleted_ds` / `deleted_at` 是**引擎代管的元数据列**,自动加、**不许自己声明**:`ds`/`deleted_ds`(天,`YYYYMMDD`,分区 / 时光机判定)+ `created_at`/`deleted_at`(精确时刻)。见 [`../works/time_machine.md`](../works/time_machine.md)。
 
-**`searchable`**
+**`primary`** —— 表级单独字段,主键列名。每表有且仅有一个;须是 `str` / `int` 列;是三引擎对齐的锚。
 
-- 列出哪些列可被 `search()` 语义检索。声明了 → `insert` 时该列文本自动 embed、`search()` 自动查。
-- 有 `searchable` 列 ⇒ **必须注入 embedder**,否则 `EmbedderInvalid`。没有则是纯 DuckDB 表,零向量开销。
+**`searchable`**(可选)—— 哪些列可被 `search()` 检索,**必须是 `str` 列**。声明了 ⇒ **必须注入 embedder**(否则 `EmbedderInvalid`);没有则是纯 DuckDB 表、零向量开销。
 
-**文件镜像**:**每表自动**落成按天分区的 `<表>.jsonl`(**无 `files` 声明**),详见 [`../works/store.md`](../works/store.md)。
+**文件镜像**:**每表自动**落成按天分区的 `<表>.jsonl`(无 `files` 声明),详见 [`../works/store.md`](../works/store.md)。
 
 **校验规则**(`seekbase.schema.parse_schema`)
 
 | 规则 | 违反 → |
 |---|---|
-| 每表恰一个 `primary` | `SchemaError` |
+| `SCHEMA` 是列表;每项有 `table`(唯一)| `SchemaError` |
+| `columns` 是列表;每项 `{name, type}`,列名唯一 | `SchemaError` |
+| `primary` 指向一个已声明的 `str`/`int` 列 | `SchemaError` |
 | 不许声明 `ds`/`created_at`/`deleted_ds`/`deleted_at` | `SchemaError` |
-| 列类型 ∈ `str/int/float/bool` | `SchemaError` |
-| `searchable` 列须是已声明列 | `SchemaError` |
+| 列类型合法(含 `decimal(p,s)` 的 `p`/`s`)| `SchemaError` |
+| `searchable` 列须是已声明的 `str` 列 | `SchemaError` |
 | 有 `searchable` 却无 embedder | `EmbedderInvalid` |
 
 ## 4. 注入 embedder
