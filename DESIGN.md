@@ -98,6 +98,7 @@ seekbase/                      # 仓库根
     read_write/                # SQL query 读 + 异步 insert/delete round-trip
     file_mirror/               # 文件镜像:写落 jsonl、删是 append 墓碑、rebuild 重灌
     search/                    # SQL 里的 search():排序、结构化/时间窗组合、删后搜不到
+    embedder_live/             # 真实 embedding API 端到端(需 env,默认 skip)
     insert_only/               # delete 只打墓碑、无 update 路径
     time_machine/              # ds_start/ds_end 时间窗 + 只读闸(嵌入)
     schema/                    # SCHEMA 校验(list 形态)+ 未知列拒 + searchable 需 embedder
