@@ -128,7 +128,7 @@ file 面  ≥  row 面(DuckDB)  ≥  vector 面(LanceDB)
 两个校准动作:
 
 - **`repair`(open 时轻量自检)**:`file ≥ row` 不变式若被打破,从 files 补齐。
-- **`rebuild()`(显式重建)**:整体从 files 重灌双引擎(见 [api/functions.md](../api/functions.md))。
+- **`rebuild()`(显式重建)**:整体从 files 重灌双引擎(见 [api/operations.md](../api/operations.md))。
 
 对账也靠 files:DuckDB 原生 `read_json` / glob 能把 files 当外部表,直接与 row 面 diff(`SELECT * FROM read_json('files/cards/**/*.json')`)。
 

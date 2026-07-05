@@ -59,7 +59,6 @@ SCHEMA = {
 | `files` 占位符须是已声明列 | `SchemaError` |
 | 有 `searchable` 却无 embedder | `EmbedderInvalid`(在 `open`) |
 
-## 两种形态
+## 声明在哪
 
-- **函数形态**:`Seekbase.open(dir, schema=SCHEMA, embedder=…)` 直接传。
-- **HTTP 形态**:schema 是 **server 端配置**——在起 server 的那段代码里传给 `Seekbase.open`(见 [functions.md](functions.md#server-启动));客户端 `connect` **不带 schema**,由 server 校验列名等。
+schema 在 `Seekbase.open(dir, schema=SCHEMA, embedder=…)` 传入,是 **server / 进程端配置**。HTTP 形态下它在 **server 端**——`connect` 的客户端**不带 schema**,由 server 校验列名等(起 server 见 [setup.md](setup.md#起-server))。
