@@ -79,12 +79,10 @@ SCHEMA = {
     "cards": {
         "columns": {"card_id": "str primary", "issue": "str", "kind": "str"},
         "searchable": ["issue"],                 # 可 search() 的列(写入自动 embed)
-        "files": "cards/{card_id}.json",         # 本地 JSON 镜像(可 grep)
     },
     "rounds": {
         "columns": {"session_id": "str", "idx": "int", "text": "str"},
         "searchable": ["text"],
-        "files": {"path": "sessions/{session_id}/rounds.jsonl", "mode": "jsonl"},
     },
 }
 ```
@@ -100,20 +98,16 @@ SCHEMA = {
 - 列出哪些列可被 `search()` 语义检索。声明了 → `insert` 时该列文本自动 embed、`search()` 自动查。
 - 有 `searchable` 列 ⇒ **必须注入 embedder**,否则 `EmbedderInvalid`。没有则是纯 DuckDB 表,零向量开销。
 
-**`files`**(本地镜像,详见 [`../works/store.md`](../works/store.md))
-
-- 字符串 = 一行一文件(json):`"cards/{card_id}.json"`(路径模板含**主键**)。
-- 字典 = 显式模式:`{"path": "...", "mode": "json" | "jsonl"}`(jsonl 按**分组键**追加)。
-- 模板 `{占位符}` 必须是已声明列;没声明 `files` = 无镜像。
+**文件镜像**:**每表自动**落成按天分区的 `<表>.jsonl`(**无 `files` 声明**),详见 [`../works/store.md`](../works/store.md)。
 
 **校验规则**(`seekbase.schema.parse_schema`)
 
 | 规则 | 违反 → |
 |---|---|
 | 每表恰一个 `primary` | `SchemaError` |
-| 不许声明 `created_at`/`deleted_at` | `SchemaError` |
+| 不许声明 `ds`/`created_at`/`deleted_ds`/`deleted_at` | `SchemaError` |
 | 列类型 ∈ `str/int/float/bool` | `SchemaError` |
-| `searchable` / `files` 占位符须是已声明列 | `SchemaError` |
+| `searchable` 列须是已声明列 | `SchemaError` |
 | 有 `searchable` 却无 embedder | `EmbedderInvalid` |
 
 ## 4. 注入 embedder

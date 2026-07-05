@@ -74,7 +74,7 @@ seekbase/                      # 仓库根
     __init__.py                # 对外导出:Seekbase + 值类型 + 协议 + 错误
     _types.py                  # Row/Hit、Embedder 协议、错误层级 —— 纯值类型
     port.py                    # Seekbase(async 门面,open/connect)+ QueryBuilder(链式)
-    schema.py                  # SCHEMA 解析/校验 → 内部 TableSpec(columns/searchable/files)
+    schema.py                  # SCHEMA 解析/校验 → 内部 TableSpec(columns/primary/searchable)
     server.py                  # 手写 ASGI app(seekbase_server / serve)—— server 形态(§9)  [M1 已落]
     _wire.py                   # Request 序列化 + 错误↔HTTP 状态码映射(client/server 共用)  [M1 已落]
     _engine/
@@ -83,7 +83,7 @@ seekbase/                      # 仓库根
       duck.py                  # DuckdbEngine:单写者连接、DDL、SQL 编译执行、as-of 可见性
       bridge.py                # async↔sync 桥(单线程 executor,串行化 DuckDB)  [M1 已落]
       vector.py                # VectorEngine:LanceDB 管理(吸收 searchbase.local)  [M3]
-      files.py                 # FileMirror:json / jsonl 三写、原子落盘、read_json 桥  [M2]
+      files.py                 # FileMirror:按天分区、每表 <表>.jsonl append、read_json 桥  [M2]
       outbox.py                # Outbox(DuckDB 表)+ Consumer(进程内协程)  [M3]
       planner.py               # 查询规划:search()+谓词组合、过滤下推、as-of 改写  [M3]
       asof.py                  # 时光机:ds 日期分区裁剪 / 只读闸  [M4]
@@ -163,7 +163,7 @@ hits = await (db.table("cards")
 ```python
 rows = await db.sql("SELECT kind, count(*) FROM cards GROUP BY kind")  # 只读直查(as-of 下自动回溯)
 await db.flush()             # 排干 outbox → 读己之写(search 立即可见)
-await db.rebuild()           # 通读 files 声明 → 重灌 DuckDB + LanceDB(派生层可重建)
+await db.rebuild()           # 按 ds 顺序 replay 全部 <表>.jsonl → 重灌 DuckDB + LanceDB(派生层可重建)
 await db.vacuum(before=T)    # 显式丢历史:物理清 T 前墓碑(行 + 向量 + 文件)
 ```
 
@@ -177,12 +177,10 @@ SCHEMA = {
     "cards": {
         "columns": {"card_id": "str primary", "issue": "str", "kind": "str"},
         "searchable": ["issue"],                 # 这列可 search():写入自动 embed,search 自动查
-        "files": "cards/{card_id}.json",         # 本地 JSON 镜像(可 grep)
     },
     "rounds": {
         "columns": {"session_id": "str", "idx": "int", "text": "str"},
         "searchable": ["text"],
-        "files": {"path": "sessions/{session_id}/rounds.jsonl", "mode": "jsonl"},
     },
 }
 ```
@@ -190,8 +188,8 @@ SCHEMA = {
 - `columns` 类型:`str/int/float/bool` + 修饰 `primary`(每表恰一主键,做 id 对齐)。**声明式、不从首行推断**(避免 null→错判列型,searchbase 已踩过)。
 - `ds` / `created_at` / `deleted_ds` / `deleted_at` 是**引擎代管的元数据列**:schema 没写也自动加、**不许自己声明**(时光机靠这两对日期字段,§6.5 / [works/schema.md](docs/works/schema.md) / [works/time_machine.md](docs/works/time_machine.md))。
 - `searchable` = 「search 自动模糊查询」的开关:声明了 → insert 自动 embed 进向量侧、search 自动查;没声明的表就是**纯 DuckDB 表,零向量开销**。
-- `files` 缺省 = 无镜像(纯派生/日志表不必落盘)。
-- **schema 校验在 open 时做一次**:主键唯一、searchable/files 列存在、模板占位符都是真实列、embedder 存在性(有 searchable 列却没给 embedder → 明确报错)。
+- **文件镜像每表自动**(无 `files` 声明):每张表落成按天分区的 `<表>.jsonl`(见 §6.6 / [works/store.md](docs/works/store.md))。
+- **schema 校验在 open 时做一次**:主键唯一、searchable 列存在、embedder 存在性(有 searchable 列却没给 embedder → 明确报错)。
 
 ### 4.6 值类型与协议(`_types.py`)
 
@@ -224,7 +222,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 <data_dir>/                       # 一个 Seekbase 实例 = 一个目录(拷走=完整备份)
   duck.db                         # DuckDB 单文件:业务行 + _outbox 表 + _meta
   lance/                          # LanceDB:每个有 searchable 列的表一个 collection
-  files/                          # 文件镜像(canonical):顶层按 ds=YYYYMMDD 日期分区,内 cards/*.json 等
+  files/                          # 文件镜像(canonical):顶层按 ds=YYYYMMDD 日期分区,内每表一个 <表>.jsonl
   _meta.json                      # 实例元:schema 指纹、seekbase 版本、embedder dim
 ```
 
@@ -243,7 +241,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
         ┌───────────────────┼───────────────────┐
    FileMirror           DuckdbEngine         VectorEngine
    (files.py)            (duck.py)            (vector.py, 吸收 searchbase)
-   json/jsonl 三写        行·过滤·聚合·join      embed·ANN·auto_split·压缩
+   每表 jsonl append     行·过滤·聚合·join      embed·ANN·auto_split·压缩
         └───────── Outbox + Consumer(outbox.py)对齐 ─────────┘
 ```
 
@@ -261,7 +259,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 - **at-least-once + 幂等**:consumer 可能重放(标 done 前崩),但向量按 id upsert/delete 幂等,重放无害;不需恰好一次。
 - **崩溃恢复 = 重放**:pending 与业务行同事务落盘,重启从 pending 续跑;彻底丢了还能 `rebuild()` 从文件整体重建。
 - **一致性关系固定可推理**:`file ≥ row ≥ vector`。file 面永不缺数据(至多瞬时超前 row 一步,crash 后 repair 收敛);row(不带 search 的查询)强一致;vector 最终一致。要读己之写 → `flush()`。
-- `delete()` 同路:一个 DuckDB 事务里给行打墓碑 + 入队向量删除作业;文件侧把 `deleted_at` 写回 JSON(json 唯一一次重写)/ 给 jsonl 追加墓碑行。
+- `delete()` 同路:一个 DuckDB 事务里给行打墓碑 + 入队向量删除作业;文件侧往**删除日** `ds=X/<表>.jsonl` append 一条墓碑记录(纯 append,不回改已写行)。
 
 ### 6.3 planner:search() 与谓词组合
 
@@ -296,7 +294,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 
 ### 6.6 rebuild / repair
 
-- `rebuild()`:读 `files` 声明的全部文件(DuckDB 原生 `read_json`/glob 当外部表)→ 重灌 DuckDB 行 + 重新入队全部向量作业。派生层「表丢了能重建」从各 store 手写变成一个内建动作。
+- `rebuild()`:按 `ds` 顺序 replay 全部 `<表>.jsonl`(DuckDB 原生 `read_json`/glob 当外部表)→ 重灌 DuckDB 行 + 重新入队全部向量作业。派生层「表丢了能重建」从各 store 手写变成一个内建动作。
 - `repair`(open 时轻量自检):file ≥ row 不变式若被 crash 打破(文件有、行没有),从文件补行 + 补 outbox;vector 缺失由 outbox replay 自愈。
 
 ---
@@ -320,7 +318,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 | 里程碑 | 内容 | 产出可用性 |
 |---|---|---|
 | **M1 骨架 + 结构化 + 两形态** | 包骨架、pyproject、schema 解析、DuckdbEngine、ORM(select/insert/delete/count)、SQL 直查、async 桥、部分 as-of;**执行器抽象 + server 形态(open/connect,ASGI app,HTTP client)** | 嵌入 + server 两形态都能用 |
-| **M2 文件镜像** | FileMirror(json/jsonl、原子落盘、read_json 桥)、三写顺序、rebuild/repair | file-canonical 立住 |
+| **M2 文件镜像** | FileMirror(按天分区 / 每表 jsonl append、read_json 桥)、三写顺序、rebuild/repair | file-canonical 立住 |
 | **M3 向量 + search** | 吸收 searchbase→VectorEngine、Outbox+Consumer、planner 下推、`search()`、`flush()` | 语义查询上线 |
 | **M4 时光机** | `ds`/`deleted_ds` 日期分区、as-of 分区裁剪、vacuum(按行清死行) | 时光机严谨 |
 | **M5 打磨** | `ApiEmbedder`(核心自带)、README、契约测试补全、错误信息、`_meta` schema 指纹 | 可发 PyPI |

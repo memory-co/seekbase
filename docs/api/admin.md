@@ -6,7 +6,7 @@
 
 ## POST /v1/rebuild — 从文件重建 `[M2]`
 
-通读 `files` 声明的全部文件 → 重灌 DuckDB + LanceDB。「表丢了能从文件重建」的内建动作(见 [`../works/store.md`](../works/store.md))。异步,返回 `ticket`。
+按 `ds` 顺序 replay 全部 `<表>.jsonl` → 重灌 DuckDB + LanceDB。「表丢了能从文件重建」的内建动作(见 [`../works/store.md`](../works/store.md))。异步,返回 `ticket`。
 
 **函数形态**:`ticket = await db.rebuild(); await db.wait(ticket)`
 

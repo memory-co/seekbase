@@ -71,13 +71,13 @@ ds <= D  AND  (deleted_ds IS NULL OR deleted_ds > D)
 
 ## 7. 落到三写(files / DuckDB / 向量)
 
-时间维度怎么在 [store.md](store.md) 的三写里维护:
+时间维度怎么在 [store.md](store.md) 的三写里维护(文件 = 按天分区、每表一个 append 日志 `ds=D/<表>.jsonl`):
 
-- **insert 事件** → 写**创建日**分区 `files/ds=C/…`(行完整快照,`deleted_ds` 初始空)。
-- **delete 事件** → 写**删除日**分区 `files/ds=X/…` 一条墓碑 `{"_deleted": "<pk>", "src_ds": "C", "deleted_at": "…"}`——**不回改创建分区的原文件**,纯 append。
-- **派生 DuckDB 行**:一行带 `ds / created_at / deleted_ds / deleted_at`;消费 delete 事件时把该行的 `deleted_ds`/`deleted_at` 置上(派生表可就地改,canonical 文件不改)。
+- **insert 事件** → 往**创建日** `files/ds=C/<表>.jsonl` append 一行(行快照,`deleted_ds` 初始空)。
+- **delete 事件** → 往**删除日** `files/ds=X/<表>.jsonl` append 一条墓碑 `{"_deleted": "<pk>", "deleted_at": "…"}`——**不回改任何已写的行**,纯 append。
+- **派生 DuckDB 行**:一行带 `ds / created_at / deleted_ds / deleted_at`;消费 delete 事件时按主键把该行的 `deleted_ds`/`deleted_at` 置上(派生表可就地改,canonical 文件不改)。
 - **查询**只碰派生表(§4 谓词),不扫文件;文件是审计 + `rebuild` 源。
-- `ls files/ds=D/` = **「D 那天发生的事」** = 当天创建的行 + 当天删除的墓碑。rebuild = 从头按 `ds` 顺序 replay 所有事件分区(insert 建行、delete 置 `deleted_ds`)。
+- `ls files/ds=D/` = **「D 那天发生的事」** = 当天写的行 + 当天删除的墓碑。rebuild = 按 `ds` 顺序 replay 所有 `<表>.jsonl`(insert 建行 / latest-wins、`_deleted` 按主键置 `deleted_ds`)。
 
 ## 8. `vacuum`:按行清死行,**不是**整块删分区
 
@@ -88,7 +88,7 @@ deleted_ds < D          -- 删除发生在 D 之前 → 任何 ≥D 的视角都
 ```
 
 - **活行,以及删于 `≥ D` 的行,一律保留**——它们在 horizon `≥ D` 仍可见。
-- 所以 `vacuum` **不能**简单 `rm -rf ds<D/`:那会误删「**早创建但仍活**」的行(它的创建事件在旧分区里)。正确做法是按 `deleted_ds < D` **逐行**清理:删该行的创建文件 + 墓碑 + 派生行 + 向量。
+- 所以 `vacuum` **不能**简单 `rm -rf ds<D/`:那会误删「**早创建但仍活**」的行(它的 insert 行在旧分区的 jsonl 里)。正确做法是按 `deleted_ds < D` **逐行**清理:**重写受影响的 `<表>.jsonl`**、丢掉这些行的 insert / 墓碑事件(整表整天全死就删掉该文件),同步清派生行 + 向量。
 - 代价明确:`vacuum(before=D)` 后只能倒带到 `≥ D`;`D` 之前的删除历史被丢弃。
 
 ## 9. 边界与约定
@@ -101,6 +101,6 @@ deleted_ds < D          -- 删除发生在 D 之前 → 任何 ≥D 的视角都
 
 ## 10. 和其他文档的关系
 
-- [store.md](store.md):三写与文件布局(顶层 `ds=YYYYMMDD` 分区、分片、原子性);本文补「时间维度」的完备性。
+- [store.md](store.md):三写与文件布局(顶层 `ds=YYYYMMDD` 分区、每表 `<表>.jsonl`、原子性);本文补「时间维度」的完备性。
 - [api/query.md](../api/query.md):`ds_start`/`ds_end` 的对外接口;§5 是它的语义定义。
 - [api/setup.md](../api/setup.md):`ds` / `deleted_ds` 作为引擎代管列的声明位置。
