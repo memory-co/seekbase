@@ -1,24 +1,18 @@
 # seekbase API 参考
 
-按「一类接口一个 md」组织。每个接口都同时给**两种形态**:
+seekbase 有两种使用形态,**共用一套语义**。文档按「先 HTTP、后函数」组织:
 
-- **函数形态(embedded)**:`await Seekbase.open(...)` 后进程内直接调。
-- **HTTP 形态(server)**:`await Seekbase.connect(url)` 后同样的调用代码走 HTTP;想不经 Python 客户端、直接打 HTTP 的,每篇给出对应的 `POST /v1/execute` 线格式。
+1. **[http.md](http.md) — HTTP 形态(权威契约)**。所有查询最终都序列化成 `POST /v1/execute` 的一个操作;这份协议是底层契约,先读它。
+2. **[functions.md](functions.md) — 函数形态(Python)**。`Seekbase.open`(嵌入)/ `Seekbase.connect`(客户端)构造的就是上面那些 HTTP 请求;调用代码两形态逐字节相同。
 
-> 两形态**调用代码逐字节相同**——差别只在你用 `open` 还是 `connect` 拿 `db`。HTTP 形态下,查询链会被序列化成一个 `POST /v1/execute` 请求(线格式见 [server.md](server.md))。
-
-## 分类
+配置与共享定义:
 
 | md | 覆盖 |
 |---|---|
-| [connection.md](connection.md) | `open` / `connect` / `ready` / `close` / async context manager |
-| [query.md](query.md) | ORM 链:`table` / `select` / `insert` / `delete` / `count` / `search` + 过滤/排序/分页算子 |
-| [sql-and-admin.md](sql-and-admin.md) | `sql`(只读直查)/ `flush` / `rebuild` / `vacuum` |
-| [schema.md](schema.md) | 声明式 SCHEMA(`columns` / `searchable` / `files`)|
-| [embedders.md](embedders.md) | `Embedder` 协议 + 默认 `ApiEmbedder` |
-| [server.md](server.md) | `seekbase_server` / `serve` + HTTP 端点与线格式 |
+| [http.md](http.md) | 鉴权、端点、`Request` 线格式、每个 `op` 的请求/响应、`as_of`、错误→状态码 |
+| [functions.md](functions.md) | `open`/`connect`、查询链与算子、`sql`/`flush`/`rebuild`/`vacuum`、server 启动 |
+| [schema.md](schema.md) | 声明式 SCHEMA(`columns`/`searchable`/`files`)—— server 端配置 |
+| [embedders.md](embedders.md) | `Embedder` 协议 + 默认 `ApiEmbedder` —— server 端配置 |
 | [errors.md](errors.md) | 错误层级 + 错误↔HTTP 状态码映射 |
 
-## M1 现状标注
-
-各篇按**目标 API** 写;当前里程碑(M1)未落的用 `[M3]` / `[M4]` 等标出:`search()` 已接受但执行抛 `NotSupportedYet`(M3),`flush()` 为 no-op(M3),`rebuild()`/`vacuum()` 抛 `NotSupportedYet`(M2/M4)。
+> **M1 现状**:各篇按目标 API 写,未落的用 `[M2]`/`[M3]`/`[M4]` 标出——`search` 抛 `NotSupportedYet`(M3),`flush` no-op(M3),`rebuild`/`vacuum` 抛 `NotSupportedYet`(M2/M4)。

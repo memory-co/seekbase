@@ -62,4 +62,4 @@ SCHEMA = {
 ## 两种形态
 
 - **函数形态**:`Seekbase.open(dir, schema=SCHEMA, embedder=…)` 直接传。
-- **HTTP 形态**:schema 是 **server 端配置**——在起 server 的那段代码里传给 `Seekbase.open`(见 [server.md](server.md));客户端 `connect` **不带 schema**,由 server 校验列名等。
+- **HTTP 形态**:schema 是 **server 端配置**——在起 server 的那段代码里传给 `Seekbase.open`(见 [functions.md](functions.md#server-启动));客户端 `connect` **不带 schema**,由 server 校验列名等。

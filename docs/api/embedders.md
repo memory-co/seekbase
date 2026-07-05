@@ -46,4 +46,4 @@ await embedder.aclose()   # 关 httpx 客户端
 Embedder 是 **server/进程端的东西**,不是客户端的:
 
 - **函数形态**:`Seekbase.open(..., embedder=…)` 注入。
-- **HTTP 形态**:embedder 在 **server 端**——起 server 时注入给 `Seekbase.open`;`connect` 的客户端**不带 embedder**,embedding 在 server 上算(见 [server.md](server.md))。这正是「调用方不见向量、连 embedder 都不用带」在 HTTP 上的兑现。
+- **HTTP 形态**:embedder 在 **server 端**——起 server 时注入给 `Seekbase.open`;`connect` 的客户端**不带 embedder**,embedding 在 server 上算(见 [functions.md](functions.md#server-启动))。这正是「调用方不见向量、连 embedder 都不用带」在 HTTP 上的兑现。
