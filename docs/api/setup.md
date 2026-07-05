@@ -94,7 +94,7 @@ SCHEMA = {
 
 - 类型:`str` / `int` / `float` / `bool`;修饰 `primary`——**每表恰一个主键**。
 - **声明式、不从首行推断**(避免首行 null 把列判成 string)。
-- `created_at` / `deleted_at` / `ds` 是**引擎代管的元数据列**,自动加;**不许自己声明**。`ds`(写入日 `YYYYMMDD`)是时光机 / 时间窗的日期分区列(见 [query.md](query.md#时间窗-ds_start--ds_end日期分区) / [`../works/store.md`](../works/store.md))。
+- `ds` / `created_at` / `deleted_ds` / `deleted_at` 是**引擎代管的元数据列**,自动加;**不许自己声明**。两对(创建 / 删除)日期字段:`ds`/`deleted_ds`(天,`YYYYMMDD`,分区 / 时光机判定)+ `created_at`/`deleted_at`(精确时刻)。完整设计见 [`../works/time_machine.md`](../works/time_machine.md)。
 
 **`searchable`**
 

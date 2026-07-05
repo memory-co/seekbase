@@ -286,15 +286,14 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 
 ### 6.5 时光机 = 日期分区(`ds`)
 
-时光机用**离线大数据那套分区**实现,不靠谓词改写:每行带一个引擎自动维护的日期分区列 `ds`(写入日,格式 `YYYYMMDD`,如 `ds=20260705`)。
+时光机用**离线大数据那套分区**实现,不靠谓词改写。**完整设计(创建/删除两对日期字段、可见性谓词、完备性证明、vacuum 语义)见 [works/time_machine.md](docs/works/time_machine.md)**;这里给要点。
 
-- **机制 = 分区裁剪**:`query` 带 `ds_start` / `ds_end`(闭区间,`YYYYMMDD`)→ 只读该区间的分区。只给 `ds_end` = 时光机(`ds <= ds_end`,回到那天及之前);只给 `ds_start` = 那天之后;两个都给 = 一个时间段。天然是分区裁剪(partition pruning),扫描量随时间窗收敛,不是全表加谓词。时间窗是**查询参数、不绑在连接上**。
-- **文件即分区**:文件镜像用 `ds=YYYYMMDD` 做**顶层目录**(见 §6.6 / [works/store.md](docs/works/store.md)),`ls files/ds=20260705/` 就是当天全部数据——审计 / 备份 / 「回看某天」都落到「看一个目录」。
-- **粒度 = 天**:as-of 精度到日(offline 惯例);要日内更细,分区键内仍保留 `created_at` 做二级过滤。
-- **删除同为带 `ds` 的记录**:`delete` 打墓碑也是一次写、落当天分区;`ds_end` 裁掉更晚的分区,晚于窗口的删除天然不可见——删除的时光机由分区一并兜住,不需额外谓词。
-- `search()` 同样按 `ds` 分区裁剪(向量侧按分区/`ds` 字段 pre-filter);写被 `ReadOnlyError` 挡住。
-- **严谨性靠 insert-only + 分区**:每天分区一旦过去就不再变(墓碑是新分区里的新记录),不存在被后来 update 污染的历史。
-- 代价:历史分区常驻 = 空间换历史;`vacuum(before=D)` 显式丢史 = **整块删掉 `ds < D` 的分区目录**(行+向量+文件),比逐行清墓碑更干脆。
+- **两对引擎代管日期字段**:创建 `(ds, created_at)` + 删除 `(deleted_ds, deleted_at)`;`_ds` 是天(`YYYYMMDD`,分区/时光机判定),`_at` 是精确时刻。**只有创建日不够**——判断「as-of D 时该行是否已删」必须有删除日 `deleted_ds`(否则早创建、晚删除的行会被错判)。
+- **可见性谓词**:as-of D = `ds <= D AND (deleted_ds IS NULL OR deleted_ds > D)`。`ds <= D` 是分区裁剪(扫描量随时间窗收敛);`deleted_ds` 那半句管删除回溯。
+- **机制 = 分区裁剪**:`query` 带 `ds_start` / `ds_end`(闭区间)。只给 `ds_end` = 时光机(as-of ds_end);只给 `ds_start` = 那天之后仍活;两个都给 = 该窗口创建、且 ds_end 时仍活。时间窗是**查询参数、不绑连接**。
+- **文件即分区**:文件镜像用 `ds=YYYYMMDD` 做**顶层目录**;insert 事件落创建日分区、delete 墓碑落删除日分区,`ls files/ds=20260705/` = 当天发生的事(建的行 + 删的墓碑)。
+- **严谨性靠 insert-only + 分区**:文件纯 append、永不回改;派生 DuckDB 行的 `deleted_ds` 由消费墓碑事件置上(派生可改、canonical 不改)。
+- 代价:历史常驻 = 空间换历史;`vacuum(before=D)` = **按行**清 `deleted_ds < D` 的死行(创建文件+墓碑+行+向量),**不是**整块删分区(会误删仍活的老行);活行与删于 `≥D` 的行都保留。
 
 ### 6.6 rebuild / repair
 
@@ -324,7 +323,7 @@ class ReadOnlyError(SeekbaseError): ...         # 往时光机连接写
 | **M1 骨架 + 结构化 + 两形态** | 包骨架、pyproject、schema 解析、DuckdbEngine、ORM(select/insert/delete/count)、SQL 直查、async 桥、部分 as-of;**执行器抽象 + server 形态(open/connect,ASGI app,HTTP client)** | 嵌入 + server 两形态都能用 |
 | **M2 文件镜像** | FileMirror(json/jsonl、原子落盘、read_json 桥)、三写顺序、rebuild/repair | file-canonical 立住 |
 | **M3 向量 + search** | 吸收 searchbase→VectorEngine、Outbox+Consumer、planner 下推、`search()`、`flush()` | 语义查询上线 |
-| **M4 时光机** | `ds` 日期分区、as-of 分区裁剪、只读闸、vacuum(整块删分区) | 时光机严谨 |
+| **M4 时光机** | `ds`/`deleted_ds` 日期分区、as-of 分区裁剪、vacuum(按行清死行) | 时光机严谨 |
 | **M5 打磨** | `ApiEmbedder`(核心自带)、README、契约测试补全、错误信息、`_meta` schema 指纹 | 可发 PyPI |
 
 一次交付 = M1→M5 全落;里程碑只为内部可验收切分。

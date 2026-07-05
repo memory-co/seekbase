@@ -87,11 +87,11 @@
 
 每行带一个引擎代管的分区列 `ds`(写入日,`YYYYMMDD`)。`ds_start` / `ds_end` 是**闭区间**的两端,直接就是完整的分区过滤语义——传哪个决定语义:
 
-| 传入 | 语义 | ds 过滤 |
+| 传入 | 语义 | 创建过滤(`ds`) |
 |---|---|---|
 | 都不传 | 全部(当前态) | 无 |
 | 只 `ds_end` | **时光机**:回到那天及之前 | `ds <= ds_end` |
-| 只 `ds_start` | 那天及之后 | `ds >= ds_start` |
+| 只 `ds_start` | 那天及之后、至今仍活 | `ds >= ds_start` |
 | 都传 | 一个时间段 | `ds_start <= ds <= ds_end` |
 
 ```json
@@ -99,6 +99,8 @@
 {"sql": "SELECT * FROM cards", "ds_start": "20260601", "ds_end": "20260607"}        // 6/1~6/7 一周
 {"sql": "SELECT * FROM cards", "ds_start": "20260601"}                              // 6/1 之后至今
 ```
+
+> 上表是**创建维度**的过滤;存活判定还叠加**删除 horizon**——as-of `ds_end` 会把「删于 `ds_end` 之后」的行仍算作可见(靠 `deleted_ds` 字段)。完整可见性谓词 `ds <= D AND (deleted_ds IS NULL OR deleted_ds > D)`、四种情况的精确语义、以及完备性证明见 [`../works/time_machine.md`](../works/time_machine.md)。
 
 - 这是**分区裁剪**,扫描量随时间窗收敛;`search()` 一并按 `ds` 裁剪。
 - 等价于在 SQL 里写 `WHERE ds >= … AND ds <= …`;`ds_start`/`ds_end` 是把它提成请求参数(server 直接用来选分区)。也可在 `sql` 里自己用 `ds` 列(`WHERE ds = '20260605'` 看某天)。
