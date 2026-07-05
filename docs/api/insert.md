@@ -44,7 +44,7 @@ await db.wait(ticket)                   # 或阻塞到 done / failed
 
 ### 副作用
 
-写入按 files → 行 → 向量的顺序兑现(见 [`../works/store.md`](../works/store.md)):文件最先原子落地,再一个 DuckDB 事务写行 + 入队,最后异步补向量。任一步崩溃可从文件校准。
+写入按 files → 行 → 向量的顺序兑现(见 [`../works/store.md`](../works/store.md)):**文件最先** append 进 `ds=今天/<表>.jsonl`(canonical),再写 DuckDB 派生行,最后(M3)异步补向量。任一步崩溃可从文件 `rebuild`/校准。
 
 ### 错误
 
@@ -81,7 +81,8 @@ await db.wait(ticket)                   # 或阻塞到 done / failed
 
 ---
 
-## M1 现状
+## 现状
 
 - 提交 / 查状态接口:✅ 可用。
-- **写目前同步兑现**(outbox + 向量在 `[M3]`、文件镜像在 `[M2]`):当前 `insert` 落库后即返回 `state: "done"` 的 ticket——异步骨架先立住,真正的 files/向量异步兑现随 M2/M3 接上,接口不变。
+- **文件镜像(M2)✅**:`insert` 先 append 进 `<表>.jsonl`,再写 DuckDB 行;`rebuild` 能从文件重灌(见 [admin.md](admin.md))。
+- **写目前同步兑现**:向量侧(outbox + LanceDB)在 `[M3]`;当前 `insert` 落库后即返回 `state: "done"` 的 ticket——异步骨架已立,向量异步兑现随 M3 接上,接口不变。

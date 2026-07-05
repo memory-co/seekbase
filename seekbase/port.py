@@ -47,7 +47,7 @@ class Seekbase:
                 "schema declares searchable columns but no embedder was provided"
             )
         bridge = Bridge()
-        duck = await DuckdbEngine.open(data_dir / "duck.db", parsed, bridge)
+        duck = await DuckdbEngine.open(data_dir, parsed, bridge)
         return cls(LocalExecutor(bridge, duck))
 
     @classmethod

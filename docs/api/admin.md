@@ -4,23 +4,18 @@
 
 ---
 
-## POST /v1/rebuild — 从文件重建 `[M2]`
+## POST /v1/rebuild — 从文件重建 ✅
 
-按 `ds` 顺序 replay 全部 `<表>.jsonl` → 重灌 DuckDB + LanceDB。「表丢了能从文件重建」的内建动作(见 [`../works/store.md`](../works/store.md))。异步,返回 `ticket`。
+按 `ds` 顺序 replay 全部 `<表>.jsonl` → 重灌 DuckDB(向量侧 M3)。「表丢了能从文件重建」的内建动作(见 [`../works/store.md`](../works/store.md))。异步,返回 `ticket`;`done` 后带 `stats`。
 
-**函数形态**:`ticket = await db.rebuild(); await db.wait(ticket)`
+**函数形态**:`ticket = await db.rebuild(); st = await db.wait(ticket)`
 
 ### 请求体 / 响应
 
 ```json
-{}   →   202 {"ticket": "wr_…", "state": "pending"}
+{}   →   200 {"ticket": "wr_…", "op": "rebuild", "state": "done",
+              "stats": {"tables": 2, "rows": 120, "tombstones": 5}}
 ```
-
-### 错误
-
-| 情况 | 状态 / type |
-|---|---|
-| M1 未实现 | 501 `NotSupportedYet` |
 
 ---
 

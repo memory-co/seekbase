@@ -40,7 +40,7 @@ async def test_error_types_propagate(pair):
     with pytest.raises(NotFound):
         await client.write_status("wr_missing")            # unknown ticket -> 404
     with pytest.raises(NotSupportedYet):
-        await client.rebuild()                             # M2 -> 501
+        await client.vacuum(before="20260101")             # M4 -> 501
 
 
 async def test_wrong_api_key_rejected(tmp_path):

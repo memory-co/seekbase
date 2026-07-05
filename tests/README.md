@@ -10,10 +10,11 @@
 |---|---|
 | [`quickstart/`](quickstart/) | 最基础的本地用法(端到端):开库 → 写 → 查 → 删 → 再查,不起 server、不需 embedder;含关库重开数据仍在 |
 | [`read_write/`](read_write/) | SQL `query` 读 + 异步 `insert`/`delete`(ticket)round-trip:批量、参数化、`count`、重复主键 latest-wins |
-| [`insert_only/`](insert_only/) | `delete()` 只打墓碑:正常查询看不到、但行物理还在(raw SQL 能看到 `deleted_at`);没有 update 路径 |
+| [`file_mirror/`](file_mirror/) | canonical 文件镜像:写落 `ds=…/<表>.jsonl`、删是 append 墓碑、`rebuild` 从文件重灌恢复精确状态 |
+| [`insert_only/`](insert_only/) | `delete()` 只打墓碑:正常查询看不到、重删匹配 0;端口无 update/upsert |
 | [`time_machine/`](time_machine/) | `ds_start`/`ds_end` 时间窗:时光机回退、区间、只读闸、ds 格式校验 |
-| [`schema/`](schema/) | SCHEMA 校验(主键/保留列/类型/files 占位符)+ 未知列被拒 + searchable 列必须给 embedder + `search()` 已接受但 M3 才落 |
-| [`server/`](server/) | server 形态:同一条链走 HTTP、错误保型过线、`as_of` 只读在 HTTP 上也生效、鉴权、health、runner 外部注入 |
+| [`schema/`](schema/) | SCHEMA 校验(list 形态:table/columns/primary/类型/decimal)+ 未知列被拒 + searchable 须 str + 需 embedder + 高级类型 DDL round-trip |
+| [`server/`](server/) | server 形态:同一套调用走 HTTP、错误保型过线(含 `NotFound`)、鉴权、health、runner 外部注入 |
 
 ## 共享 fixture / helper(`conftest.py`)
 

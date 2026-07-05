@@ -55,7 +55,8 @@ class LocalExecutor:
                 raise NotFound(f"unknown ticket {req.ticket!r}")
             return st
         if op == "rebuild":
-            raise NotSupportedYet("rebuild() lands with the file mirror (M2)")
+            stats = await self._duck.rebuild()
+            return self._record("rebuild", {"stats": stats})
         if op == "vacuum":
             if not req.before or not _DS_RE.match(req.before):
                 raise QueryError("vacuum needs before=YYYYMMDD")

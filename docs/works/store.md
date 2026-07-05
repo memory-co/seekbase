@@ -1,6 +1,6 @@
 # store — 三写形态设计(files / DuckDB / LanceDB)
 
-> 状态:设计(落地 M2 文件镜像 + M3 向量/outbox)。本文定下三个存储的角色、files 目录结构(**按天分区、每表一个 append 日志**)、insert 的「文件最先」原子性顺序,以及用 files 校准派生层的机制。
+> 状态:**M2 文件镜像已落**(files 三写的 file+row 两写 + `rebuild` replay);向量那一路(M3)与完整 `vacuum`(M4)仍在路上。本文定下三个存储的角色、files 目录结构(**按天分区、每表一个 append 日志**)、insert 的「文件最先」原子性顺序,以及用 files 校准派生层的机制。
 
 ## 1. 三个存储,一个端口
 
