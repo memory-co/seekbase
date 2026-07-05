@@ -84,4 +84,10 @@ await db.close()
 - **业务无关**:不认识任何业务概念、不读任何 config——由你注入 `data_dir`、`schema`,以及(要 search 时)一个 `embedder`。
 - **调用方永远不见向量**:声明 `searchable` 列;`search(text)` 自动 embed + 检索 + 在同一条链上和结构化过滤组合。
 
+## 文档
+
+- [DESIGN.md](DESIGN.md) —— 整体设计
+- [docs/api/](docs/api/) —— API 参考(一类接口一个 md,函数形态 + HTTP 形态都注明)
+- [docs/works/](docs/works/) —— 专题设计:[store.md](docs/works/store.md)(三写形态 files/DuckDB/LanceDB)
+
 Apache-2.0。
