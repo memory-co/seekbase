@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ._engine._bridge import Bridge
+from ._engine.bridge import Bridge
 from ._engine.duck import DuckdbEngine
 from ._engine.executor import HttpExecutor, LocalExecutor
 from ._engine.plan import Predicate, Request

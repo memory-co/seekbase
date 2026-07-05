@@ -15,7 +15,7 @@ from typing import Any
 
 from .._types import NotSupportedYet, QueryError, ReadOnlyError
 from .._wire import exception_from, serialize_request
-from ._bridge import Bridge
+from .bridge import Bridge
 from .duck import DuckdbEngine
 from .plan import Request
 

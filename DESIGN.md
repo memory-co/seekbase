@@ -81,7 +81,7 @@ seekbase/                      # 仓库根
       plan.py                  # Predicate / Plan / Request —— 传输中立的查询原语  [M1 已落]
       executor.py              # LocalExecutor(→DuckDB)/ HttpExecutor(→HTTP),两形态的接缝  [M1 已落]
       duck.py                  # DuckdbEngine:单写者连接、DDL、SQL 编译执行、as-of 可见性
-      _bridge.py               # async↔sync 桥(单线程 executor,串行化 DuckDB)  [M1 已落]
+      bridge.py                # async↔sync 桥(单线程 executor,串行化 DuckDB)  [M1 已落]
       vector.py                # VectorEngine:LanceDB 管理(吸收 searchbase.local)  [M3]
       files.py                 # FileMirror:json / jsonl 三写、原子落盘、read_json 桥  [M2]
       outbox.py                # Outbox(DuckDB 表)+ Consumer(进程内协程)  [M3]

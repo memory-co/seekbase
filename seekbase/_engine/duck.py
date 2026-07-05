@@ -22,7 +22,7 @@ import duckdb
 
 from .._types import QueryError, ReadOnlyError
 from ..schema import CREATED_AT, DELETED_AT, Schema, TableSpec
-from ._bridge import Bridge
+from .bridge import Bridge
 from .plan import Plan, Predicate  # re-exported for callers
 
 __all__ = ["DuckdbEngine", "Plan", "Predicate"]
