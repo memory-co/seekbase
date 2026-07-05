@@ -12,7 +12,6 @@ db = await Seekbase.open(
     *,
     schema=SCHEMA,      # 声明式表结构(见 §3)
     embedder=None,      # Embedder;schema 有 searchable 列时必填(见 §4)
-    as_of=None,         # None=当前态;ISO 时间点=只读时光机(query 的 as_of 也可 per-request 给)
 )
 ```
 
@@ -21,7 +20,8 @@ db = await Seekbase.open(
 | `data_dir` | 是 | 实例目录;`duck.db` / `lance/` / `files/` 都落这里,拷走目录 = 拷走整个库 |
 | `schema` | 是 | 声明式表结构(§3) |
 | `embedder` | 视情况 | schema 有 `searchable` 列时必填,否则 `EmbedderInvalid` |
-| `as_of` | 否 | 给 ISO 字符串则连接**只读**,查询回退到那个时刻 |
+
+> 时光机 / 时间窗**不在连接上**——是 `query` 的 `ds_start`/`ds_end` 参数(见 [query.md](query.md#时间窗-ds_start--ds_end日期分区));句柄本身不绑时间。
 
 ### `Seekbase.connect` — HTTP 客户端
 
@@ -30,7 +30,6 @@ db = await Seekbase.connect(
     url,                # "http://localhost:8000"
     *,
     api_key=None,       # bearer token(server 配了才需要)
-    as_of=None,         # 只读回退,随每请求带给 server
     transport=None,     # 可选 httpx transport(测试用 ASGITransport)
 )
 ```
@@ -95,7 +94,7 @@ SCHEMA = {
 
 - 类型:`str` / `int` / `float` / `bool`;修饰 `primary`——**每表恰一个主键**。
 - **声明式、不从首行推断**(避免首行 null 把列判成 string)。
-- `created_at` / `deleted_at` / `ds` 是**引擎代管的元数据列**,自动加;**不许自己声明**。`ds`(写入日 `YYYYMMDD`)是时光机的日期分区列(见 [query.md](query.md#时光机-as_of日期分区) / [`../works/store.md`](../works/store.md))。
+- `created_at` / `deleted_at` / `ds` 是**引擎代管的元数据列**,自动加;**不许自己声明**。`ds`(写入日 `YYYYMMDD`)是时光机 / 时间窗的日期分区列(见 [query.md](query.md#时间窗-ds_start--ds_end日期分区) / [`../works/store.md`](../works/store.md))。
 
 **`searchable`**
 
