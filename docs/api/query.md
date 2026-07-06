@@ -100,7 +100,7 @@
 {"sql": "SELECT * FROM cards", "ds_start": "20260601"}                              // 6/1 之后至今
 ```
 
-> 上表是**创建维度**的过滤;存活判定还叠加**删除 horizon**——as-of `ds_end` 会把「删于 `ds_end` 之后」的行仍算作可见(靠 `deleted_ds` 字段)。完整可见性谓词 `ds <= D AND (deleted_ds IS NULL OR deleted_ds > D)`、四种情况的精确语义、以及完备性证明见 [`../works/time_machine.md`](../works/time_machine.md)。
+> 上表是**创建维度**的过滤;存活判定还叠加**删除 horizon**——as-of `ds_end` 会把「删于 `ds_end` 之后」的行仍算作可见。派生表是 append-only 事件日志,查询按**事件重放**现算「as-of 的最新存活版本」,对多版本(建→删→重插)也完备——精确语义与证明见 [`../works/time_machine.md`](../works/time_machine.md)。
 
 - 这是**分区裁剪**,扫描量随时间窗收敛;`search()` 一并按 `ds` 裁剪。
 - 等价于在 SQL 里写 `WHERE ds >= … AND ds <= …`;`ds_start`/`ds_end` 是把它提成请求参数(server 直接用来选分区)。也可在 `sql` 里自己用 `ds` 列(`WHERE ds = '20260605'` 看某天)。

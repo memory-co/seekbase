@@ -47,7 +47,7 @@ await db.wait(ticket)
 
 ### 副作用
 
-- 记一条带 `ds`(删除日)的**墓碑**:canonical 文件在**当天分区追加**一条删除记录、**不回改原文件**;派生的 DuckDB 行一并置 `deleted_at`(见 [`../works/store.md` §5](../works/store.md))。时光机据分区裁剪,`ds_end` 早于删除日仍见该行。
+- 记一条带 `ds`(删除日)的**墓碑事件**——canonical 文件在**删除日分区追加**一条 `{"_deleted": pk, …}`,派生 DuckDB **INSERT 一条 del 事件**(纯 append,**不回改任何已写的行**)。见 [`../works/store.md` §5](../works/store.md)。时光机据事件重放,`ds_end` 早于删除日仍见该行(那时最新事件还是 put)。
 - 已经是墓碑的行不再重复打。
 
 ### 错误

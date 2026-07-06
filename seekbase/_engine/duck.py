@@ -1,10 +1,16 @@
-"""DuckdbEngine — the structured/analytical engine.
+"""DuckdbEngine — the structured/analytical engine (append-only).
 
-DDL (+ engine-managed metadata + the outbox table), the read path (`query`:
-read-only SQL over per-request visibility views; `search('…')` rewritten to a
-join against vector-search results), the write path (files-first, then DuckDB,
-then enqueue vector jobs to the outbox), and `rebuild` (replay the file mirror).
-The vector side is drained asynchronously by the executor's consumer.
+DuckDB storage is **insert-only, like the files**: every write is a new event
+row, never an UPDATE or REPLACE.
+- insert → a *put* event (business columns + ds + created_at, `_seq`).
+- delete → a *del* event (pk + deleted_ds + deleted_at, `_seq`); business
+  columns NULL, ds NULL.
+- re-insert of a pk → just another put event (a new version).
+
+`query` reads a per-request **reconstruction view**: for each pk, take the
+latest event (`_seq`) whose day ≤ the horizon; the row is live iff that event is
+a put. This makes the time machine complete for arbitrary create/delete/re-
+insert histories, and query is strictly read-only.
 """
 from __future__ import annotations
 
@@ -26,6 +32,7 @@ __all__ = ["DuckdbEngine", "extract_search", "search_target"]
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DS_RE = re.compile(r"^\d{8}$")
 _SEARCH_RE = re.compile(r"search\(\s*'((?:[^']|'')*)'\s*\)", re.IGNORECASE)
+_SEQ = "_seq"
 
 
 def _ident(name: str) -> str:
@@ -92,9 +99,10 @@ class DuckdbEngine:
         await bridge.run(engine._create_tables)
         return engine
 
-    # ─── DDL ───────────────────────────────────────────────────────────
+    # ─── DDL (append-only event tables; no primary key, no update) ─────
 
     def _create_tables(self) -> None:
+        self._conn.execute("CREATE SEQUENCE IF NOT EXISTS _sb_row_seq")
         for spec in self._schema.tables:
             cols = ", ".join(f"{_ident(c.name)} {c.sql_type}" for c in spec.columns)
             self._conn.execute(
@@ -102,7 +110,7 @@ class DuckdbEngine:
                 f"{cols}, "
                 f"{_ident(DS)} VARCHAR, {_ident(CREATED_AT)} VARCHAR, "
                 f"{_ident(DELETED_DS)} VARCHAR, {_ident(DELETED_AT)} VARCHAR, "
-                f"PRIMARY KEY ({_ident(spec.primary_key)}))"
+                f"{_ident(_SEQ)} BIGINT)"
             )
         self._conn.execute("CREATE SEQUENCE IF NOT EXISTS _sb_outbox_seq")
         self._conn.execute(
@@ -111,34 +119,32 @@ class DuckdbEngine:
             "ticket VARCHAR, tbl VARCHAR, op VARCHAR, pk VARCHAR, txt VARCHAR, state VARCHAR)"
         )
 
-    # ─── visibility ────────────────────────────────────────────────────
+    # ─── reconstruction views (latest live version as of a horizon) ────
 
-    def _visibility(self, ds_start: str | None, ds_end: str | None) -> str:
-        clauses: list[str] = []
-        if ds_end is None:
-            clauses.append(f"{_ident(DELETED_DS)} IS NULL")
-        else:
-            clauses.append(f"{_ident(DS)} <= '{ds_end}'")
-            clauses.append(
-                f"({_ident(DELETED_DS)} IS NULL OR {_ident(DELETED_DS)} > '{ds_end}')"
-            )
-        if ds_start is not None:
-            clauses.append(f"{_ident(DS)} >= '{ds_start}'")
-        return " AND ".join(clauses)
+    def _reconstruction(self, spec: TableSpec, ds_start: str | None, ds_end: str | None) -> str:
+        pk = _ident(spec.primary_key)
+        cols = ", ".join(_ident(c) for c in spec.all_column_names)
+        horizon = ("" if ds_end is None
+                   else f"WHERE COALESCE({_ident(DS)}, {_ident(DELETED_DS)}) <= '{ds_end}'")
+        start = "" if ds_start is None else f" AND {_ident(DS)} >= '{ds_start}'"
+        return (
+            f"SELECT {cols} FROM ("
+            f"SELECT *, row_number() OVER (PARTITION BY {pk} ORDER BY {_ident(_SEQ)} DESC) AS _rn "
+            f"FROM (SELECT * FROM {_phys(spec.name)} {horizon})"
+            f") WHERE _rn = 1 AND {_ident(DS)} IS NOT NULL{start}"
+        )
 
     def _install_views(
         self, ds_start: str | None, ds_end: str | None, search_table: str | None = None
     ) -> None:
-        vis = self._visibility(ds_start, ds_end)
         for spec in self._schema.tables:
+            recon = self._reconstruction(spec, ds_start, ds_end)
             if spec.name == search_table:
-                body = (
-                    f"SELECT base.*, s._score FROM {_phys(spec.name)} base "
-                    f"JOIN _sb_search s ON CAST(base.{_ident(spec.primary_key)} AS VARCHAR) = s.pk "
-                    f"WHERE {vis}"
-                )
+                pk = _ident(spec.primary_key)
+                body = (f"SELECT base.*, s._score FROM ({recon}) base "
+                        f"JOIN _sb_search s ON CAST(base.{pk} AS VARCHAR) = s.pk")
             else:
-                body = f"SELECT * FROM {_phys(spec.name)} WHERE {vis}"
+                body = recon
             self._conn.execute(f"CREATE OR REPLACE TEMP VIEW {_ident(spec.name)} AS {body}")
 
     # ─── read ──────────────────────────────────────────────────────────
@@ -164,13 +170,11 @@ class DuckdbEngine:
                 if search is not None:
                     target, results = search
                     self._conn.execute(
-                        "CREATE OR REPLACE TEMP TABLE _sb_search (pk VARCHAR, _score DOUBLE)"
-                    )
+                        "CREATE OR REPLACE TEMP TABLE _sb_search (pk VARCHAR, _score DOUBLE)")
                     if results:
                         self._conn.executemany(
                             "INSERT INTO _sb_search VALUES (?, ?)",
-                            [[p, sc] for p, sc in results],
-                        )
+                            [[p, sc] for p, sc in results])
                 self._install_views(ds_start, ds_end, search_table=target)
                 cur = self._conn.execute(stmt, list(params))
                 names = [d[0] for d in cur.description]
@@ -180,14 +184,14 @@ class DuckdbEngine:
 
         return await self._bridge.run(_do)
 
-    # ─── write (files-first → DuckDB → outbox) ─────────────────────────
+    # ─── write (append-only: put/del events, files-first) ──────────────
 
-    def _insert_records(self, spec: TableSpec, records: list[dict]) -> None:
+    def _insert_puts(self, spec: TableSpec, records: list[dict]) -> None:
         json_cols = {c.name for c in spec.columns if c.type == "json"}
-        cols = [*spec.column_names, DS, CREATED_AT, DELETED_DS, DELETED_AT]
-        col_sql = ", ".join(_ident(c) for c in cols)
-        placeholders = ", ".join("?" * len(cols))
-        sql = f"INSERT OR REPLACE INTO {_phys(spec.name)} ({col_sql}) VALUES ({placeholders})"
+        cols = [*spec.column_names, DS, CREATED_AT]
+        col_sql = ", ".join(_ident(c) for c in cols) + f", {_ident(_SEQ)}"
+        placeholders = ", ".join("?" * len(cols)) + ", nextval('_sb_row_seq')"
+        sql = f"INSERT INTO {_phys(spec.name)} ({col_sql}) VALUES ({placeholders})"
         payload: list[list[Any]] = []
         for rec in records:
             values = []
@@ -196,17 +200,23 @@ class DuckdbEngine:
                 if c in json_cols and v is not None:
                     v = json.dumps(v)
                 values.append(v)
-            values += [rec.get(DS), rec.get(CREATED_AT), rec.get(DELETED_DS), rec.get(DELETED_AT)]
+            values += [rec.get(DS), rec.get(CREATED_AT)]
             payload.append(values)
         self._conn.executemany(sql, payload)
+
+    def _insert_dels(self, spec: TableSpec, keys: list, ds: str, deleted_at) -> None:
+        pk = spec.primary_key
+        sql = (f"INSERT INTO {_phys(spec.name)} "
+               f"({_ident(pk)}, {_ident(DELETED_DS)}, {_ident(DELETED_AT)}, {_ident(_SEQ)}) "
+               f"VALUES (?, ?, ?, nextval('_sb_row_seq'))")
+        self._conn.executemany(sql, [[k, ds, deleted_at] for k in keys])
 
     def _enqueue(self, jobs: list[tuple]) -> None:
         if jobs:
             self._conn.executemany(
                 "INSERT INTO _sb_outbox (ticket, tbl, op, pk, txt, state) "
                 "VALUES (?, ?, ?, ?, ?, 'pending')",
-                [list(j) for j in jobs],
-            )
+                [list(j) for j in jobs])
 
     async def insert(self, table: str, rows: list[dict], ticket: str) -> None:
         spec = self._schema.table(table)
@@ -229,7 +239,7 @@ class DuckdbEngine:
         await self._bridge.run(lambda: [self._mirror.append(ds, table, r) for r in records])
 
         def _db() -> None:
-            self._insert_records(spec, records)
+            self._insert_puts(spec, records)
             self._enqueue(jobs)
 
         await self._bridge.run(_db)
@@ -242,21 +252,15 @@ class DuckdbEngine:
 
         def _do() -> int:
             try:
+                # evaluate `where` against the CURRENT live state
+                self._install_views(None, None, None)
                 cur = self._conn.execute(
-                    f"SELECT {_ident(pk)} FROM {_phys(table)} "
-                    f"WHERE ({stmt}) AND {_ident(DELETED_DS)} IS NULL",
-                    list(params),
-                )
+                    f"SELECT {_ident(pk)} FROM {_ident(table)} WHERE ({stmt})", list(params))
                 keys = [r[0] for r in cur.fetchall()]
                 for k in keys:
                     self._mirror.append(ds, table, {"_deleted": k, DELETED_AT: now})
                 if keys:
-                    self._conn.execute(
-                        f"UPDATE {_phys(table)} SET {_ident(DELETED_DS)} = ?, "
-                        f"{_ident(DELETED_AT)} = ? WHERE {_ident(pk)} IN "
-                        f"({', '.join('?' * len(keys))})",
-                        [ds, now, *keys],
-                    )
+                    self._insert_dels(spec, keys, ds, now)
                     if spec.searchable:
                         self._enqueue([(ticket, table, "delete", str(k), None) for k in keys])
                 return len(keys)
@@ -282,7 +286,7 @@ class DuckdbEngine:
         ).fetchone())
         return int(r[0])
 
-    # ─── rebuild (replay the file mirror; re-enqueue vectors) ──────────
+    # ─── rebuild (replay the file mirror in ds order) ──────────────────
 
     async def rebuild(self) -> dict:
         def _do() -> dict:
@@ -294,18 +298,13 @@ class DuckdbEngine:
                 tables += 1
                 for ds, rec in self._mirror.iter_events(spec.name):
                     if "_deleted" in rec:
-                        self._conn.execute(
-                            f"UPDATE {_phys(spec.name)} SET {_ident(DELETED_DS)} = ?, "
-                            f"{_ident(DELETED_AT)} = ? WHERE {_ident(spec.primary_key)} = ?",
-                            [ds, rec.get(DELETED_AT), rec["_deleted"]],
-                        )
+                        self._insert_dels(spec, [rec["_deleted"]], ds, rec.get(DELETED_AT))
                         if spec.searchable:
                             self._enqueue([("rebuild", spec.name, "delete", str(rec["_deleted"]), None)])
                         tombs += 1
                     else:
-                        self._insert_records(spec, [rec])
-                        text = " ".join(
-                            str(rec[c]) for c in spec.searchable if rec.get(c) is not None)
+                        self._insert_puts(spec, [rec])
+                        text = " ".join(str(rec[c]) for c in spec.searchable if rec.get(c) is not None)
                         if spec.searchable and text:
                             self._enqueue([("rebuild", spec.name, "upsert",
                                             str(rec[spec.primary_key]), text)])

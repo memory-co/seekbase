@@ -44,7 +44,7 @@ await db.wait(ticket)                   # 或阻塞到 done / failed
 
 ### 副作用
 
-写入按 files → 行 → 向量的顺序兑现(见 [`../works/store.md`](../works/store.md)):**文件最先** append 进 `ds=今天/<表>.jsonl`(canonical),再写 DuckDB 派生行,最后(M3)异步补向量。任一步崩溃可从文件 `rebuild`/校准。
+写入按 files → 行 → 向量的顺序兑现(见 [`../works/store.md`](../works/store.md)):**文件最先** append 进 `ds=今天/<表>.jsonl`(canonical),再往 DuckDB **INSERT 一条 put 事件**(纯 append),最后(M3)异步补向量。任一步崩溃可从文件 `rebuild`/校准。
 
 ### 错误
 
