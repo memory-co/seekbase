@@ -39,8 +39,6 @@ async def test_error_types_propagate(pair):
         await client.query("SELECT * FROM nope")           # unknown table -> 400
     with pytest.raises(NotFound):
         await client.write_status("wr_missing")            # unknown ticket -> 404
-    with pytest.raises(QueryError):
-        await client.vacuum(before="2026-01-01")           # bad ds format -> 400
 
 
 async def test_wrong_api_key_rejected(tmp_path):

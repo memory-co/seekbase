@@ -7,7 +7,7 @@ sides agree on. Operations mirror the API docs:
   read:   query
   write:  insert / delete            (async: return a ticket)
   poll:   status                     (GET /v1/writes/{ticket})
-  admin:  rebuild / vacuum
+  admin:  rebuild
 """
 from __future__ import annotations
 
@@ -29,7 +29,6 @@ class Request:
     where: str | None = None          # delete
     # poll / admin
     ticket: str | None = None         # status
-    before: str | None = None         # vacuum
     _extra: dict = field(default_factory=dict)
 
 

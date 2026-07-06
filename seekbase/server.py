@@ -8,7 +8,6 @@ docs/api/:
   POST /v1/delete           write → {"ticket", "state", "matched", ...}
   GET  /v1/writes/{ticket}  poll write status
   POST /v1/rebuild          admin (async ticket)
-  POST /v1/vacuum           admin (async ticket)
   GET  /v1/health           {"ready": bool}
 
 ``seekbase_server(db)`` returns the ASGI app; the runner (uvicorn/…) is external
@@ -54,8 +53,6 @@ def _request_for(method: str, path: str, body: dict) -> Request:
                        where=body.get("where"), params=tuple(body.get("params") or ()))
     if method == "POST" and path == "/v1/rebuild":
         return Request(op="rebuild")
-    if method == "POST" and path == "/v1/vacuum":
-        return Request(op="vacuum", before=body.get("before"))
     if method == "GET" and path.startswith("/v1/writes/"):
         return Request(op="status", ticket=path[len("/v1/writes/"):])
     return None

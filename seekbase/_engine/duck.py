@@ -314,33 +314,6 @@ class DuckdbEngine:
 
         return await self._bridge.run(_do)
 
-    async def vacuum(self, before: str) -> dict[str, list[str]]:
-        """Physically remove rows whose ``deleted_ds < before`` (dead at every
-        horizon >= before): DuckDB rows + file lines. Returns the purged pks per
-        table (the caller drops their vectors). Live rows and rows deleted at
-        >= before are kept."""
-        def _do() -> dict[str, list[str]]:
-            out: dict[str, list[str]] = {}
-            for spec in self._schema.tables:
-                cur = self._conn.execute(
-                    f"SELECT CAST({_ident(spec.primary_key)} AS VARCHAR) FROM {_phys(spec.name)} "
-                    f"WHERE {_ident(DELETED_DS)} IS NOT NULL AND {_ident(DELETED_DS)} < ?",
-                    [before],
-                )
-                dead = [r[0] for r in cur.fetchall()]
-                out[spec.name] = dead
-                if dead:
-                    self._conn.execute(
-                        f"DELETE FROM {_phys(spec.name)} WHERE "
-                        f"CAST({_ident(spec.primary_key)} AS VARCHAR) IN "
-                        f"({', '.join('?' * len(dead))})",
-                        dead,
-                    )
-                    self._mirror.purge(spec.name, spec.primary_key, set(dead))
-            return out
-
-        return await self._bridge.run(_do)
-
     async def close(self) -> None:
         await self._bridge.run(self._conn.close)
 

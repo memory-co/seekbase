@@ -1,6 +1,6 @@
 # store — 三写形态设计(files / DuckDB / LanceDB)
 
-> 状态:**M2–M4 已落**(files→行→向量三写:文件 append、DuckDB 派生行、outbox→LanceDB 异步兑现;`rebuild` replay;`vacuum` 按行清死行 + 重写 jsonl)。本文定下三个存储的角色、files 目录结构(**按天分区、每表一个 append 日志**)、insert 的「文件最先」原子性顺序,以及用 files 校准派生层的机制。
+> 状态:**M2/M3 已落**(files→行→向量三写:文件 append、DuckDB 派生行、outbox→LanceDB 异步兑现;`rebuild` replay)。**delete 永久墓碑、无物理删 / vacuum**(文件真·纯 append,零例外)。本文定下三个存储的角色、files 目录结构(**按天分区、每表一个 append 日志**)、insert 的「文件最先」原子性顺序,以及用 files 校准派生层的机制。
 
 ## 1. 三个存储,一个端口
 
@@ -117,7 +117,7 @@ file 面  ≥  row 面(DuckDB)  ≥  vector 面(LanceDB)
 - **rebuild 保真**:按 `ds` 顺序 replay,insert 行建行、`_deleted` 行按主键置 `deleted_ds`。
 - **grep 看得见**:`grep _deleted files/ds=20260706/cards.jsonl` 就是当天删了什么。
 
-真正物理删只发生在显式 `vacuum(before=D)`:**按行**清 `deleted_ds < D` 的死行——重写受影响的 `<表>.jsonl`、丢掉那些行的 insert / 墓碑事件(整表整天全死就删掉文件),同步清派生行 + 向量。**不是**整块删分区(会误删「早创建但仍活」的行)。活行、删于 `≥ D` 的行都保留;代价:vacuum 后只能倒带到 `≥ D`。见 [time_machine.md §8](time_machine.md)。
+**没有物理删、没有 vacuum**:`delete` 永远只是墓碑,被删的行永久留着——文件真·纯 append,一次都不回改(墓碑那次也是 append 新事件,不改旧文件)。空间单调增长,memory 规模可接受;换来「历史永不丢」。见 [time_machine.md §8](time_machine.md)。
 
 ## 6. 与 file-canonical 的关系
 

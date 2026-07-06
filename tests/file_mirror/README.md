@@ -16,7 +16,7 @@ canonical、DuckDB 是可从文件重建的派生层:
 ## 不在这测什么
 
 - 时间窗查询走 [`time_machine/`](../time_machine/)
-- 三写里的向量那一路(M3)、`vacuum`(M4)—— 尚未实现
+- 三写里的向量那一路走 [`search/`](../search/)
 
 ## fixture 来源
 

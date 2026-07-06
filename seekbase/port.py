@@ -113,10 +113,6 @@ class Seekbase:
         res = await self._exec.execute(Request(op="rebuild"))
         return res["ticket"]
 
-    async def vacuum(self, *, before: str) -> str:
-        res = await self._exec.execute(Request(op="vacuum", before=before))
-        return res["ticket"]
-
     # ─── lifecycle ─────────────────────────────────────────────────────
 
     @property

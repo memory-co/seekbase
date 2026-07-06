@@ -57,7 +57,7 @@ await db.wait(ticket)                   # 或阻塞到 done / failed
 
 ## GET /v1/writes/{ticket} — 查状态
 
-按 `ticket` 查这次写入(insert / delete / rebuild / vacuum 都用这个)。
+按 `ticket` 查这次写入(insert / delete / rebuild 都用这个)。
 
 ### 响应
 

@@ -2,7 +2,7 @@
 
 删数据。**异步**,同 [insert](insert.md) 的提交 + 轮询模式:提交删除条件,返回 `ticket`,用 [`GET /v1/writes/{ticket}`](insert.md#get-v1writesticket--查状态) 查状态。
 
-**打墓碑,非物理删**:`delete` 唯一语义是给匹配的存活行写 `deleted_at`。行物理还在(时光机 / raw SQL 仍能看到「它曾存在」),`query` 默认自动滤掉。真正物理删只有 [`vacuum`](admin.md)。
+**打墓碑,非物理删**:`delete` 唯一语义是给匹配的存活行写 `deleted_at`。行物理还在(时光机 / raw SQL 仍能看到「它曾存在」),`query` 默认自动滤掉。**没有物理删**——墓碑永久保留(历史即资产)。
 
 **函数形态**:
 

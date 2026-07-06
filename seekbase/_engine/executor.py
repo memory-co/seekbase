@@ -17,7 +17,7 @@ from typing import Any
 
 from .._types import NotFound, QueryError
 from .bridge import Bridge
-from .duck import DuckdbEngine, _DS_RE, extract_search, search_target
+from .duck import DuckdbEngine, extract_search, search_target
 from .plan import Request
 
 _SEARCH_K = 100
@@ -66,16 +66,6 @@ class LocalExecutor:
         if op == "rebuild":
             stats = await self._duck.rebuild()
             return await self._ticket_result(_new_ticket(), "rebuild", {"stats": stats})
-        if op == "vacuum":
-            if not req.before or not _DS_RE.match(req.before):
-                raise QueryError("vacuum needs before=YYYYMMDD")
-            dead = await self._duck.vacuum(req.before)
-            if self._vector is not None:
-                for tbl, pks in dead.items():
-                    for pk in pks:
-                        await self._vector.delete(tbl, pk)
-            stats = {"purged": sum(len(v) for v in dead.values())}
-            return await self._ticket_result(_new_ticket(), "vacuum", {"stats": stats})
         raise QueryError(f"unknown op {op!r}")
 
     async def _run_query(self, req: Request) -> list[dict]:
@@ -163,8 +153,6 @@ class HttpExecutor:
             return await self._get(f"/v1/writes/{req.ticket}")
         if op == "rebuild":
             return await self._post("/v1/rebuild", {})
-        if op == "vacuum":
-            return await self._post("/v1/vacuum", {"before": req.before})
         raise QueryError(f"unknown op {op!r}")
 
     async def _post(self, path: str, body: dict) -> Any:
