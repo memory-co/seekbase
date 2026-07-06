@@ -31,11 +31,10 @@ server 配了 `api_key` 时每个请求须带 `Authorization: Bearer <api_key>`;
 | 400 | `SchemaError` / `EmbedderInvalid` | schema 校验 / embedder 契约失败 |
 | 401 | `Unauthorized` | bearer token 不匹配 |
 | 404 | `NotFound` | `ticket` 不存在 |
-| 501 | `NotSupportedYet` | 已设计、当前里程碑未实现 |
 | 503 | `SeekbaseUnavailable` | 底层开不了 / 不可服务 |
 | 500 | `Internal` | 未预期内部异常 |
 
-**错误保型过线**:客户端(`connect`)收到非 200 时按 `error.type` 重建同类型异常并抛出——server 侧的 `ReadOnlyError` 在客户端还是 `ReadOnlyError`。层级:`SeekbaseError`(基类)→ `SeekbaseUnavailable` / `SchemaError` / `EmbedderInvalid` / `ReadOnlyError` / `QueryError` / `NotSupportedYet`。
+**错误保型过线**:客户端(`connect`)收到非 200 时按 `error.type` 重建同类型异常并抛出——server 侧的 `ReadOnlyError` 在客户端还是 `ReadOnlyError`。层级:`SeekbaseError`(基类)→ `SeekbaseUnavailable` / `SchemaError` / `EmbedderInvalid` / `ReadOnlyError` / `QueryError`。
 
 ## 设计要点
 

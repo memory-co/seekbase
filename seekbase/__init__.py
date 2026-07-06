@@ -12,7 +12,6 @@ from ._types import (
     EmbedderInvalid,
     Hit,
     NotFound,
-    NotSupportedYet,
     QueryError,
     ReadOnlyError,
     Row,
@@ -36,6 +35,5 @@ __all__ = [
     "ReadOnlyError",
     "QueryError",
     "NotFound",
-    "NotSupportedYet",
     "__version__",
 ]

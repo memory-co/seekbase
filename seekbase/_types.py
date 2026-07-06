@@ -1,8 +1,7 @@
 """seekbase value types, the Embedder port, and the error hierarchy.
 
 Plain carriers — no business meaning (no card/round/session) lives here.
-Rows and hits are plain dicts by design (§4.2/§4.6); the optional pydantic
-binding is deferred (DESIGN §10).
+Rows and hits are plain dicts.
 """
 from __future__ import annotations
 
@@ -61,7 +60,3 @@ class QueryError(SeekbaseError):
 
 class NotFound(SeekbaseError):
     """A ticket (or other addressed object) does not exist. Maps to 404."""
-
-
-class NotSupportedYet(SeekbaseError):
-    """A designed capability not yet implemented in this milestone."""

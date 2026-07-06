@@ -22,8 +22,8 @@
 
 - `db` —— 标准嵌入 `Seekbase` + 一个 `cards` schema(happy path 用)
 - `pair` —— `(server_db, client)`:嵌入 server + 绑定它的 in-process HTTP client
-- `open_db(data_root, *, schema=, embedder=, as_of=)` —— 自定义 schema/embedder/as_of 的工厂
-- `client_for(server_db, *, app_key=, client_key=, as_of=)` —— 自定义鉴权/回退的 client
+- `open_db(data_root, *, schema=, embedder=)` —— 自定义 schema / embedder 的工厂
+- `client_for(server_db, *, app_key=, client_key=)` —— 自定义鉴权的 client
 - `serve_pair(data_root, ...)` —— `open_db` + 匹配鉴权的 client
 - `FakeEmbedder` —— 确定性、零依赖,满足 searchable 列接线(向量到 M3 才真跑)
 

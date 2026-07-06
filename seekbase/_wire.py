@@ -11,7 +11,6 @@ from typing import Any
 from ._types import (
     EmbedderInvalid,
     NotFound,
-    NotSupportedYet,
     QueryError,
     ReadOnlyError,
     SchemaError,
@@ -29,14 +28,11 @@ _ERROR_TYPES = {
         ReadOnlyError,
         QueryError,
         NotFound,
-        NotSupportedYet,
     )
 }
 
 
 def status_for(exc: Exception) -> int:
-    if isinstance(exc, NotSupportedYet):
-        return 501
     if isinstance(exc, SeekbaseUnavailable):
         return 503
     if isinstance(exc, NotFound):

@@ -10,7 +10,6 @@ keywords = ["duckdb", "lancedb", "orm", "vector-search", "embedded-database"]
 dependencies = [
     "duckdb>=1.1",       # structured/analytical engine
     "lancedb>=0.13",     # vector engine (search()); loaded only when a schema has searchable cols
-    "pydantic>=2",
     "httpx>=0.27",       # HTTP client (Seekbase.connect) + default embedder (ApiEmbedder)
     # server is standard via seekbase_server() — a zero-dep hand-rolled ASGI app.
     # The ASGI *runner* (uvicorn/hypercorn/…) is injected by the host, not bundled.

@@ -16,7 +16,7 @@
 
 - 语义 `search()` / embedder 走 [`schema/`](../schema/) 的接线 + M3
 - 墓碑物理还在、raw SQL 能看到 的细节走 [`insert_only/`](../insert_only/)
-- 过滤/排序/分页的完整算子走 [`basic_orm/`](../basic_orm/)
+- SQL 查询的完整用法走 [`read_write/`](../read_write/)
 - server / HTTP 形态走 [`server/`](../server/)
 
 ## fixture 来源
