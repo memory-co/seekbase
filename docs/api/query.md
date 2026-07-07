@@ -6,7 +6,7 @@
 - **语义检索**:SQL 里用 `search('文本')` 函数,自动 embed + 向量检索,暴露 `_score` 列,和结构化过滤写在同一条 SQL 里(**不单独开搜索接口**)。
 - **时间窗 / 时光机**:请求参数 `ds_start` / `ds_end` 按日期分区圈定时间窗——只给 `ds_end` = 回到那天(时光机),两个都给 = 查一个时间段。
 
-只读:语句须是 `SELECT` / `WITH`——写走 [insert.md](insert.md) / [delete.md](delete.md)。schema / embedder 见 [setup.md](setup.md)。
+只读:必须是**单条 `SELECT`**——写走 [insert.md](insert.md) / [delete.md](delete.md)。schema / embedder 见 [setup.md](setup.md)。
 
 **函数形态**:`await db.query("SELECT card_id, issue FROM cards WHERE kind = ?", params=["issue"], ds_end="20260601")`
 
@@ -27,7 +27,7 @@
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `sql` | 是 | 一条只读语句(`SELECT` / `WITH` 开头);非只读 → `ReadOnlyError` |
+| `sql` | 是 | **单条只读 `SELECT`**;按 DuckDB 的语句类型判定(`WITH…SELECT` 放行,`WITH…DELETE`、多语句等一律拒)→ 非只读 → `ReadOnlyError` |
 | `params` | 否 | 位置参数,填充 `sql` 里的 `?`(参数绑定,防注入);默认 `[]` |
 | `ds_start` | 否 | 日期 `YYYYMMDD`,闭区间下界;只读 `ds >= ds_start` 的分区 |
 | `ds_end` | 否 | 日期 `YYYYMMDD`,闭区间上界;只读 `ds <= ds_end` 的分区。只给它 = 时光机(见下) |
@@ -49,7 +49,7 @@
 
 | 情况 | 状态 / type |
 |---|---|
-| 语句非 `SELECT` / `WITH` | 400 `ReadOnlyError` |
+| 非单条 `SELECT`(含 `WITH…DML`、多语句、`DROP`/`COPY`/`ATTACH` 等)| 400 `ReadOnlyError` |
 | 未知表 / 列、SQL 语法错 | 400 `QueryError` |
 | `ds_start` / `ds_end` 非 `YYYYMMDD` | 400 `QueryError` |
 | `search()` 用在无 `searchable` 列的表上 | 400 `QueryError` |

@@ -159,12 +159,19 @@ class DuckdbEngine:
     ) -> list[dict]:
         _check_ds("ds_start", ds_start)
         _check_ds("ds_end", ds_end)
-        stmt = _one_statement(sql, "query")
-        head = stmt.split(None, 1)[0].lower() if stmt else ""
-        if head not in {"select", "with"}:
-            raise ReadOnlyError("query is read-only (statement must be SELECT/WITH)")
 
         def _do() -> list[dict]:
+            # read-only guard via DuckDB's own statement-type detection — robust
+            # against `WITH … DELETE` and multi-statement bypasses that a
+            # first-token check misses.
+            try:
+                stmts = self._conn.extract_statements(sql)
+            except duckdb.Error as e:
+                raise QueryError(str(e)) from e
+            if len(stmts) != 1:
+                raise ReadOnlyError("query must be a single read statement")
+            if stmts[0].type != duckdb.StatementType.SELECT:
+                raise ReadOnlyError("query is read-only (must be a SELECT)")
             try:
                 target = None
                 if search is not None:
@@ -176,7 +183,7 @@ class DuckdbEngine:
                             "INSERT INTO _sb_search VALUES (?, ?)",
                             [[p, sc] for p, sc in results])
                 self._install_views(ds_start, ds_end, search_table=target)
-                cur = self._conn.execute(stmt, list(params))
+                cur = self._conn.execute(sql, list(params))
                 names = [d[0] for d in cur.description]
                 return [dict(zip(names, row)) for row in cur.fetchall()]
             except duckdb.Error as e:

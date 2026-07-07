@@ -102,6 +102,7 @@ seekbase/                      # 仓库根
     time_machine/              # ds_start/ds_end 时间窗 + 只读闸(嵌入)
     schema/                    # SCHEMA 校验(list 形态)+ 未知列拒 + searchable 需 embedder
     server/                    # server 形态:同一套调用走 HTTP(in-process ASGITransport)
+    readonly_guard/            # query 只读:写/DDL/WITH…DML/多语句一律 ReadOnlyError
 ```
 
 > **测试组织照 memory.talk 的「按场景」路数**:每个场景一个目录,内含 `README.md`(测什么 / 不测什么 / fixture 来源)+ `test.py`;`python_files` 收 `test.py`。相关用例合并到一个场景下,跟「按代码模块切文件」解耦。
@@ -135,7 +136,7 @@ rows = await db.query(
 )   # → list[dict]
 ```
 
-- **只读**(`SELECT`/`WITH`);结构化查询、语义 `search()`(§4.3)、时光机(`ds_start`/`ds_end`)全在这一个接口。
+- **只读(强制)**:按 DuckDB 的**语句类型**判定必须是单条 `SELECT`——挡住 `WITH…DELETE` / 多语句这类「首词是 SELECT/WITH」的绕过。结构化查询、语义 `search()`(§4.3)、时光机(`ds_start`/`ds_end`)全在这一个接口。
 - **自动滤墓碑**:引擎给每张表挂一个**重放视图**——每主键取 `_seq` 最新的事件,live iff 它是 put(见 §6.5);`ds_start`/`ds_end` 圈定重放的 day 区间。
 
 ### 4.3 写:异步 `insert` / `delete`(ticket)+ `search()`
@@ -197,7 +198,7 @@ class SeekbaseError(Exception): ...
 class SeekbaseUnavailable(SeekbaseError): ...   # 底层开不了 → 宿主回 503
 class SchemaError(SeekbaseError): ...           # open 时 schema 校验失败
 class EmbedderInvalid(SeekbaseError): ...       # embedder 维度/契约不符
-class ReadOnlyError(SeekbaseError): ...         # query 传了非 SELECT/WITH 语句
+class ReadOnlyError(SeekbaseError): ...         # query 传了非单条 SELECT(按语句类型判定)
 class NotFound(SeekbaseError): ...              # ticket 不存在 → 404
 ```
 

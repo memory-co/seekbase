@@ -27,7 +27,7 @@ server 配了 `api_key` 时每个请求须带 `Authorization: Bearer <api_key>`;
 | 状态 | 异常类型 | 含义 |
 |---|---|---|
 | 400 | `QueryError` | 未知表 / 列、SQL 语法错、`ds_start`/`ds_end` 格式错 |
-| 400 | `ReadOnlyError` | `query` 传了非 `SELECT`/`WITH` 语句 |
+| 400 | `ReadOnlyError` | `query` 传了非单条 `SELECT`(按语句类型判定,挡 `WITH…DML`/多语句)|
 | 400 | `SchemaError` / `EmbedderInvalid` | schema 校验 / embedder 契约失败 |
 | 401 | `Unauthorized` | bearer token 不匹配 |
 | 404 | `NotFound` | `ticket` 不存在 |
