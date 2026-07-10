@@ -59,6 +59,39 @@ async def test_per_column_search_is_independent(tmp_path):
         await db.close()
 
 
+async def test_multiple_searches_expose_per_column_scores(tmp_path):
+    """Two search() in one query → a `_score_<col>` column each; a single
+    search still exposes bare `_score` (backward-compatible convenience)."""
+    schema = [{
+        "table": "docs",
+        "columns": [{"name": "id", "type": "str"},
+                    {"name": "title", "type": "str"}, {"name": "body", "type": "str"}],
+        "primary": "id",
+        "searchable": ["title", "body"],
+    }]
+    db = await open_db(tmp_path, schema=schema)
+    try:
+        await db.wait(await db.insert("docs", [
+            {"id": "d1", "title": "tmux terminal panes", "body": "redis cache eviction"},
+            {"id": "d2", "title": "redis cache eviction", "body": "tmux terminal panes"},
+        ]))
+        # single search → bare _score works
+        assert "_score" in (await db.query(
+            "SELECT id, _score FROM docs WHERE search(title, 'tmux') LIMIT 1"))[0]
+
+        # two searches → one score column per column
+        rows = await db.query(
+            "SELECT id, _score_title, _score_body FROM docs "
+            "WHERE search(title, 'tmux terminal panes') OR search(body, 'tmux terminal panes') "
+            "ORDER BY id")
+        by_id = {r["id"]: r for r in rows}
+        # d1 matches on title, d2 matches on body — the higher score is on the matching column
+        assert by_id["d1"]["_score_title"] > by_id["d1"]["_score_body"]
+        assert by_id["d2"]["_score_body"] > by_id["d2"]["_score_title"]
+    finally:
+        await db.close()
+
+
 async def test_deleted_row_is_not_searchable(db):
     await _seed(db)
     await db.wait(await db.delete("cards", where="card_id = ?", params=["c3"]))

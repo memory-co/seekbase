@@ -27,7 +27,7 @@ from ..schema import CREATED_AT, DELETED_AT, DELETED_DS, DS, Schema, TableSpec
 from .bridge import Bridge
 from .files import FileMirror
 
-__all__ = ["DuckdbEngine", "extract_search", "search_target"]
+__all__ = ["DuckdbEngine", "extract_searches", "search_target"]
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DS_RE = re.compile(r"^\d{8}$")
@@ -66,15 +66,25 @@ def _one_statement(sql: str, label: str) -> str:
     return s
 
 
-def extract_search(sql: str) -> tuple[str, str | None, str | None]:
-    """If ``sql`` contains ``search(column, 'literal')``, return (sql with it
-    replaced by ``TRUE``, column, text). Otherwise (sql, None, None). One call."""
-    m = _SEARCH_RE.search(sql)
-    if not m:
-        return sql, None, None
-    col = m.group(1)
-    text = m.group(2).replace("''", "'")
-    return _SEARCH_RE.sub("TRUE", sql, count=1), col, text
+def extract_searches(sql: str) -> tuple[str, list[tuple[str, str, str]]]:
+    """Replace each ``search(column, 'literal')`` with a boolean referencing its
+    score column, and return (rewritten sql, [(column, text, score_col), …]).
+    The score column is ``_score_<column>`` (deduped on collision)."""
+    specs: list[tuple[str, str, str]] = []
+    used: set[str] = set()
+
+    def _repl(m: re.Match) -> str:
+        col, text = m.group(1), m.group(2).replace("''", "'")
+        name = f"_score_{col}"
+        i = 1
+        while name in used:
+            i += 1
+            name = f"_score_{col}_{i}"
+        used.add(name)
+        specs.append((col, text, name))
+        return f'({_ident(name)} IS NOT NULL)'
+
+    return _SEARCH_RE.sub(_repl, sql), specs
 
 
 def search_target(schema: Schema, sql: str, col: str) -> str:
@@ -140,14 +150,31 @@ class DuckdbEngine:
         )
 
     def _install_views(
-        self, ds_start: str | None, ds_end: str | None, search_table: str | None = None
+        self, ds_start: str | None, ds_end: str | None, searches: list | None = None
     ) -> None:
+        # searches: list of (table, score_name, tmp_table). Group by table; each
+        # table's view LEFT JOINs its searches and exposes _score_<col> (plus a
+        # bare _score alias when the whole query has exactly one search).
+        searches = searches or []
+        by_table: dict[str, list[tuple[str, str]]] = {}
+        for table, name, tmp in searches:
+            by_table.setdefault(table, []).append((name, tmp))
+        single = len(searches) == 1
+
         for spec in self._schema.tables:
             recon = self._reconstruction(spec, ds_start, ds_end)
-            if spec.name == search_table:
+            ts = by_table.get(spec.name, [])
+            if ts:
                 pk = _ident(spec.primary_key)
-                body = (f"SELECT base.*, s._score FROM ({recon}) base "
-                        f"JOIN _sb_search s ON CAST(base.{pk} AS VARCHAR) = s.pk")
+                joins, scores = [], []
+                for i, (name, tmp) in enumerate(ts):
+                    a = f"_s{i}"
+                    joins.append(
+                        f'LEFT JOIN {_ident(tmp)} {a} ON CAST(base.{pk} AS VARCHAR) = {a}.pk')
+                    scores.append(f"{a}.score AS {_ident(name)}")
+                    if single:
+                        scores.append(f"{a}.score AS _score")
+                body = f"SELECT base.*, {', '.join(scores)} FROM ({recon}) base {' '.join(joins)}"
             else:
                 body = recon
             self._conn.execute(f"CREATE OR REPLACE TEMP VIEW {_ident(spec.name)} AS {body}")
@@ -160,7 +187,7 @@ class DuckdbEngine:
         params: list[Any],
         ds_start: str | None,
         ds_end: str | None,
-        search: tuple[str, list[tuple[str, float]]] | None = None,
+        searches: list[tuple[str, str, list[tuple[str, float]]]] | None = None,
     ) -> list[dict]:
         _check_ds("ds_start", ds_start)
         _check_ds("ds_end", ds_end)
@@ -178,16 +205,17 @@ class DuckdbEngine:
             if stmts[0].type != duckdb.StatementType.SELECT:
                 raise ReadOnlyError("query is read-only (must be a SELECT)")
             try:
-                target = None
-                if search is not None:
-                    target, results = search
+                view_searches = []
+                for i, (table, name, results) in enumerate(searches or []):
+                    tmp = f"_sb_s_{i}"
                     self._conn.execute(
-                        "CREATE OR REPLACE TEMP TABLE _sb_search (pk VARCHAR, _score DOUBLE)")
+                        f"CREATE OR REPLACE TEMP TABLE {_ident(tmp)} (pk VARCHAR, score DOUBLE)")
                     if results:
                         self._conn.executemany(
-                            "INSERT INTO _sb_search VALUES (?, ?)",
+                            f"INSERT INTO {_ident(tmp)} VALUES (?, ?)",
                             [[p, sc] for p, sc in results])
-                self._install_views(ds_start, ds_end, search_table=target)
+                    view_searches.append((table, name, tmp))
+                self._install_views(ds_start, ds_end, view_searches)
                 cur = self._conn.execute(sql, list(params))
                 names = [d[0] for d in cur.description]
                 return [dict(zip(names, row)) for row in cur.fetchall()]

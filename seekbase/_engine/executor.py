@@ -17,7 +17,7 @@ from typing import Any
 
 from .._types import NotFound, QueryError
 from .bridge import Bridge
-from .duck import DuckdbEngine, extract_search, search_target
+from .duck import DuckdbEngine, extract_searches, search_target
 from .plan import Request
 
 _SEARCH_K = 100
@@ -70,15 +70,19 @@ class LocalExecutor:
 
     async def _run_query(self, req: Request) -> list[dict]:
         sql = req.sql or ""
-        rewritten, col, text = extract_search(sql)
-        search = None
-        if text is not None:
+        rewritten, specs = extract_searches(sql)
+        searches = None
+        if specs:
             if self._vector is None:
                 raise QueryError("search() needs a searchable column + an embedder")
-            target = search_target(self._duck.schema, sql, col)
-            results = await self._vector.search(target, col, text, _SEARCH_K)
-            search, sql = (target, results), rewritten
-        return await self._duck.query(sql, list(req.params), req.ds_start, req.ds_end, search=search)
+            searches = []
+            for col, text, name in specs:
+                target = search_target(self._duck.schema, sql, col)
+                results = await self._vector.search(target, col, text, _SEARCH_K)
+                searches.append((target, name, results))
+            sql = rewritten
+        return await self._duck.query(
+            sql, list(req.params), req.ds_start, req.ds_end, searches=searches)
 
     async def _ticket_result(self, ticket: str, op: str, extra: dict) -> dict:
         meta = {"ticket": ticket, "op": op, "error": None, **extra}

@@ -3,7 +3,7 @@
 读接口:**传一段 SQL,拿回行**。结构化查询、语义检索、时光机都在这一个接口里——
 
 - **结构化**:普通 `SELECT`(join / 聚合 / 窗口都行)。
-- **语义检索**:SQL 里用 `search(列, '文本')` 函数(指定搜哪一列),自动 embed + 向量检索,暴露 `_score` 列,和结构化过滤写在同一条 SQL 里(**不单独开搜索接口**)。
+- **语义检索**:SQL 里用 `search(列, '文本')` 函数(指定搜哪一列),自动 embed + 向量检索,暴露 `_score_<列>` 列(多个 search 各自一个),和结构化过滤写在同一条 SQL 里(**不单独开搜索接口**)。
 - **时间窗 / 时光机**:请求参数 `ds_start` / `ds_end` 按日期分区圈定时间窗——只给 `ds_end` = 回到那天(时光机),两个都给 = 查一个时间段。
 
 只读:必须是**单条 `SELECT`**——写走 [insert.md](insert.md) / [delete.md](delete.md)。schema / embedder 见 [setup.md](setup.md)。
@@ -58,7 +58,7 @@
 
 ## `search()` — SQL 里的语义检索
 
-`search(列, '文本')` 是查询里的一个函数,不是另一个接口。`列` 是该表的一个 `searchable` 列(每个可搜列各自一个向量索引)。出现它时,seekbase 自动:① 用注入的 embedder 把文本变向量;② 到**那一列**的向量索引检索;③ 与 SQL 其余谓词组合;④ 暴露一个 `_score` 列(相似度)。
+`search(列, '文本')` 是查询里的一个函数,不是另一个接口。`列` 是该表的一个 `searchable` 列(每个可搜列各自一个向量索引)。出现它时,seekbase 自动:① 用注入的 embedder 把文本变向量;② 到**那一列**的向量索引检索;③ 与 SQL 其余谓词组合;④ 暴露一个 `_score_<列>` 列(相似度;单个 search 时也附便捷别名 `_score`)。
 
 ```json
 {
@@ -75,8 +75,14 @@
 ```
 
 - **在 `WHERE` 里**:把结果限定为语义命中的行;结构化谓词(`kind = 'issue'`)下推到向量检索里,保「先过滤后取 top-k」。
-- **`_score` 列**:相似度,可在 `SELECT` / `ORDER BY` 里用;不带 `search()` 的查询没有这一列。
-- 一张表只有声明了 `searchable` 列(见 [setup.md](setup.md))才能被 `search()`;否则 `QueryError`。
+- **score 列**:每个 `search(列, …)` 暴露一个 `_score_<列>`(相似度),可在 `SELECT` / `ORDER BY` 里用。**一条 query 可有多个 `search()`**(搜不同列),各自一个 `_score_<列>`;只有一个 `search()` 时额外附便捷别名 `_score`。不带 `search()` 的查询没有这些列。
+
+```json
+// 多列:各自 _score_<列>(不能写 _score.列——SQL 里点是 table.column)
+{"sql": "SELECT card_id, _score_issue, _score_kind FROM cards WHERE search(issue, 'tmux') OR search(kind, 'design') ORDER BY _score_issue DESC NULLS LAST"}
+```
+
+- 只对已声明的 `searchable` 列用 `search()`;否则 `QueryError`。
 - **调用方永远不见向量、不算 embedding**——只写文本。
 
 > **一致性**:向量侧最终一致,`search()` 可能滞后于刚提交的写入(通常毫秒级);要读己之写,等这次写入的 ticket 到 `done`(见 [insert.md](insert.md))。结构化查询(不带 `search()`)永远强一致。
