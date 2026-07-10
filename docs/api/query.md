@@ -3,7 +3,7 @@
 读接口:**传一段 SQL,拿回行**。结构化查询、语义检索、时光机都在这一个接口里——
 
 - **结构化**:普通 `SELECT`(join / 聚合 / 窗口都行)。
-- **语义检索**:SQL 里用 `search('文本')` 函数,自动 embed + 向量检索,暴露 `_score` 列,和结构化过滤写在同一条 SQL 里(**不单独开搜索接口**)。
+- **语义检索**:SQL 里用 `search(列, '文本')` 函数(指定搜哪一列),自动 embed + 向量检索,暴露 `_score` 列,和结构化过滤写在同一条 SQL 里(**不单独开搜索接口**)。
 - **时间窗 / 时光机**:请求参数 `ds_start` / `ds_end` 按日期分区圈定时间窗——只给 `ds_end` = 回到那天(时光机),两个都给 = 查一个时间段。
 
 只读:必须是**单条 `SELECT`**——写走 [insert.md](insert.md) / [delete.md](delete.md)。schema / embedder 见 [setup.md](setup.md)。
@@ -58,11 +58,11 @@
 
 ## `search()` — SQL 里的语义检索
 
-`search('文本')` 是查询里的一个函数,不是另一个接口。出现它时,seekbase 自动:① 用注入的 embedder 把文本变向量;② 到该表的向量侧检索;③ 与 SQL 其余谓词组合;④ 暴露一个 `_score` 列(相似度)。
+`search(列, '文本')` 是查询里的一个函数,不是另一个接口。`列` 是该表的一个 `searchable` 列(每个可搜列各自一个向量索引)。出现它时,seekbase 自动:① 用注入的 embedder 把文本变向量;② 到**那一列**的向量索引检索;③ 与 SQL 其余谓词组合;④ 暴露一个 `_score` 列(相似度)。
 
 ```json
 {
-  "sql": "SELECT card_id, issue, _score FROM cards WHERE search('为什么 pty 会让人想到 tmux') AND kind = 'issue' ORDER BY _score DESC LIMIT 10"
+  "sql": "SELECT card_id, issue, _score FROM cards WHERE search(issue, '为什么 pty 会让人想到 tmux') AND kind = 'issue' ORDER BY _score DESC LIMIT 10"
 }
 ```
 

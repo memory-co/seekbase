@@ -70,13 +70,13 @@ class LocalExecutor:
 
     async def _run_query(self, req: Request) -> list[dict]:
         sql = req.sql or ""
-        rewritten, text = extract_search(sql)
+        rewritten, col, text = extract_search(sql)
         search = None
         if text is not None:
             if self._vector is None:
-                raise QueryError("search() needs a searchable table + an embedder")
-            target = search_target(self._duck.schema, sql)
-            results = await self._vector.search(target, text, _SEARCH_K)
+                raise QueryError("search() needs a searchable column + an embedder")
+            target = search_target(self._duck.schema, sql, col)
+            results = await self._vector.search(target, col, text, _SEARCH_K)
             search, sql = (target, results), rewritten
         return await self._duck.query(sql, list(req.params), req.ds_start, req.ds_end, search=search)
 
@@ -99,12 +99,12 @@ class LocalExecutor:
             if not jobs:
                 await asyncio.sleep(0.02)
                 continue
-            for seq, tbl, op, pk, txt in jobs:
+            for seq, tbl, col, op, pk, txt in jobs:
                 try:
                     if op == "upsert":
-                        await self._vector.upsert(tbl, pk, txt)
+                        await self._vector.upsert(tbl, col, pk, txt)
                     else:
-                        await self._vector.delete(tbl, pk)
+                        await self._vector.delete(tbl, col, pk)
                     await self._duck.outbox_mark_done(seq)
                 except Exception:
                     await asyncio.sleep(0.05)  # transient (e.g. embedder) → retry later

@@ -88,7 +88,7 @@ await db.close()
 
 - **只增、引擎强制**:没有 `update`/`upsert`;`delete()` 只写一列 `deleted_at` 墓碑。历史因此诚实——时光机对**所有列**都严谨。
 - **业务无关**:不认识任何业务概念、不读任何 config——由你注入 `data_dir`、`schema`,以及(要 search 时)一个 `embedder`。
-- **调用方永远不见向量**:声明 `searchable` 列;SQL 里 `search('text')` 自动 embed + 检索 + 在同一条 SQL 里和结构化过滤组合。
+- **调用方永远不见向量**:声明 `searchable` 列;SQL 里 `search(列, 'text')` 自动 embed + 检索(每个可搜列各自一个向量索引)+ 在同一条 SQL 里和结构化过滤组合。
 
 ## 文档
 

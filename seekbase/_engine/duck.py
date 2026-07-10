@@ -31,7 +31,8 @@ __all__ = ["DuckdbEngine", "extract_search", "search_target"]
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DS_RE = re.compile(r"^\d{8}$")
-_SEARCH_RE = re.compile(r"search\(\s*'((?:[^']|'')*)'\s*\)", re.IGNORECASE)
+_SEARCH_RE = re.compile(
+    r"search\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*'((?:[^']|'')*)'\s*\)", re.IGNORECASE)
 _SEQ = "_seq"
 
 
@@ -65,22 +66,25 @@ def _one_statement(sql: str, label: str) -> str:
     return s
 
 
-def extract_search(sql: str) -> tuple[str, str | None]:
-    """If ``sql`` contains ``search('literal')``, return (sql with it replaced by
-    ``TRUE``, the literal text). Otherwise (sql, None). Supports one call."""
+def extract_search(sql: str) -> tuple[str, str | None, str | None]:
+    """If ``sql`` contains ``search(column, 'literal')``, return (sql with it
+    replaced by ``TRUE``, column, text). Otherwise (sql, None, None). One call."""
     m = _SEARCH_RE.search(sql)
     if not m:
-        return sql, None
-    text = m.group(1).replace("''", "'")
-    return _SEARCH_RE.sub("TRUE", sql, count=1), text
+        return sql, None, None
+    col = m.group(1)
+    text = m.group(2).replace("''", "'")
+    return _SEARCH_RE.sub("TRUE", sql, count=1), col, text
 
 
-def search_target(schema: Schema, sql: str) -> str:
-    """The single searchable table referenced by ``sql``."""
+def search_target(schema: Schema, sql: str, col: str) -> str:
+    """The single table referenced by ``sql`` that has ``col`` as searchable."""
     hits = [t.name for t in schema.tables
-            if t.searchable and re.search(rf"\b{re.escape(t.name)}\b", sql)]
+            if col in t.searchable and re.search(rf"\b{re.escape(t.name)}\b", sql)]
     if len(hits) != 1:
-        raise QueryError("search() needs exactly one searchable table in the query")
+        raise QueryError(
+            f"search({col}, …) needs exactly one table with a searchable "
+            f"{col!r} column in the query")
     return hits[0]
 
 
@@ -116,7 +120,8 @@ class DuckdbEngine:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS _sb_outbox ("
             "seq BIGINT DEFAULT nextval('_sb_outbox_seq') PRIMARY KEY, "
-            "ticket VARCHAR, tbl VARCHAR, op VARCHAR, pk VARCHAR, txt VARCHAR, state VARCHAR)"
+            "ticket VARCHAR, tbl VARCHAR, col VARCHAR, op VARCHAR, pk VARCHAR, "
+            "txt VARCHAR, state VARCHAR)"
         )
 
     # ─── reconstruction views (latest live version as of a horizon) ────
@@ -219,10 +224,11 @@ class DuckdbEngine:
         self._conn.executemany(sql, [[k, ds, deleted_at] for k in keys])
 
     def _enqueue(self, jobs: list[tuple]) -> None:
+        """Each job = (ticket, tbl, col, op, pk, txt)."""
         if jobs:
             self._conn.executemany(
-                "INSERT INTO _sb_outbox (ticket, tbl, op, pk, txt, state) "
-                "VALUES (?, ?, ?, ?, ?, 'pending')",
+                "INSERT INTO _sb_outbox (ticket, tbl, col, op, pk, txt, state) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
                 [list(j) for j in jobs])
 
     async def insert(self, table: str, rows: list[dict], ticket: str) -> None:
@@ -239,9 +245,10 @@ class DuckdbEngine:
 
         jobs = []
         for rec in records:
-            text = " ".join(str(rec[c]) for c in spec.searchable if rec.get(c) is not None)
-            if spec.searchable and text:
-                jobs.append((ticket, table, "upsert", str(rec[spec.primary_key]), text))
+            for col in spec.searchable:                 # one vector per searchable column
+                v = rec.get(col)
+                if v is not None and str(v) != "":
+                    jobs.append((ticket, table, col, "upsert", str(rec[spec.primary_key]), str(v)))
 
         await self._bridge.run(lambda: [self._mirror.append(ds, table, r) for r in records])
 
@@ -268,8 +275,8 @@ class DuckdbEngine:
                     self._mirror.append(ds, table, {"_deleted": k, DELETED_AT: now})
                 if keys:
                     self._insert_dels(spec, keys, ds, now)
-                    if spec.searchable:
-                        self._enqueue([(ticket, table, "delete", str(k), None) for k in keys])
+                    self._enqueue([(ticket, table, col, "delete", str(k), None)
+                                   for k in keys for col in spec.searchable])
                 return len(keys)
             except duckdb.Error as e:
                 raise QueryError(f"{table}: bad delete where: {e}") from e
@@ -280,7 +287,7 @@ class DuckdbEngine:
 
     async def outbox_fetch_pending(self, limit: int) -> list[tuple]:
         return await self._bridge.run(lambda: self._conn.execute(
-            "SELECT seq, tbl, op, pk, txt FROM _sb_outbox WHERE state='pending' "
+            "SELECT seq, tbl, col, op, pk, txt FROM _sb_outbox WHERE state='pending' "
             "ORDER BY seq LIMIT ?", [limit]).fetchall())
 
     async def outbox_mark_done(self, seq: int) -> None:
@@ -306,15 +313,16 @@ class DuckdbEngine:
                 for ds, rec in self._mirror.iter_events(spec.name):
                     if "_deleted" in rec:
                         self._insert_dels(spec, [rec["_deleted"]], ds, rec.get(DELETED_AT))
-                        if spec.searchable:
-                            self._enqueue([("rebuild", spec.name, "delete", str(rec["_deleted"]), None)])
+                        self._enqueue([("rebuild", spec.name, col, "delete", str(rec["_deleted"]), None)
+                                       for col in spec.searchable])
                         tombs += 1
                     else:
                         self._insert_puts(spec, [rec])
-                        text = " ".join(str(rec[c]) for c in spec.searchable if rec.get(c) is not None)
-                        if spec.searchable and text:
-                            self._enqueue([("rebuild", spec.name, "upsert",
-                                            str(rec[spec.primary_key]), text)])
+                        for col in spec.searchable:
+                            v = rec.get(col)
+                            if v is not None and str(v) != "":
+                                self._enqueue([("rebuild", spec.name, col, "upsert",
+                                                str(rec[spec.primary_key]), str(v))])
                         rows += 1
             return {"tables": tables, "rows": rows, "tombstones": tombs}
 
