@@ -17,7 +17,7 @@ from ._types import (
     SeekbaseError,
     SeekbaseUnavailable,
 )
-from .port import Seekbase
+from .client import Seekbase
 from .struct import Hit, Request, Row, Ticket
 
 __version__ = "0.0.1"

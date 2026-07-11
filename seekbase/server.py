@@ -14,7 +14,7 @@ import json
 from ._types import SeekbaseError
 from ._wire import error_body, status_for
 from .api import resolve
-from .port import Seekbase
+from .client import Seekbase
 
 
 async def _read_json(receive) -> dict:

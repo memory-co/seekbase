@@ -74,7 +74,7 @@ seekbase/                      # 仓库根
   seekbase/                    # 包(flat,不用 src/)
     __init__.py                # 对外导出:Seekbase + 值类型 + 协议 + 错误
     _types.py                  # Embedder 协议 + 错误层级 —— 行为契约(数据对象都在 struct/)
-    port.py                    # Seekbase(async 门面:open/connect/query/insert/delete/wait/…)
+    client.py                  # Seekbase(async 门面:open/connect/query/insert/delete/wait/…)
     schema.py                  # SCHEMA 解析/校验 + 类型映射(结构体在 struct/schema.py,这里只 parse)
     server.py                  # 手写 ASGI 壳:auth + 收发 + 错误映射 → 派给 api/(seekbase_server / serve)
     api/                       # HTTP API 面:一类接口一个文件(目录即接口清单,对齐 docs/api/*.md)
@@ -248,7 +248,7 @@ class NotFound(SeekbaseError): ...              # ticket 不存在 → 404
 ### 6.1 单引擎一端口(§3 概念的落地)
 
 ```
-              Seekbase(port.py:门面 query/insert/delete)
+              Seekbase(client.py:门面 query/insert/delete)
                             │  executor.py 编排
         ┌───────────────────┴───────────────────┐
    FileMirror                          DuckdbEngine(duck.db 单文件)
