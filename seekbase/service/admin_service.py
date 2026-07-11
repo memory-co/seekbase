@@ -11,9 +11,9 @@ from ..struct import CREATED_AT, DELETED_AT, DS
 
 
 class AdminService:
-    def __init__(self, store, search, files, schema, tickets) -> None:
+    def __init__(self, store, embedding, files, schema, tickets) -> None:
         self._store = store
-        self._search = search
+        self._embedding = embedding
         self._files = files
         self._schema = schema
         self._tickets = tickets
@@ -32,8 +32,8 @@ class AdminService:
                     puts.append(rec)
             recs = [{c: p.get(c) for c in spec.column_names} for p in puts]
             vecs, toks = ({}, {})
-            if self._search is not None:
-                vecs, toks = await self._search.embed_records(spec, recs)
+            if self._embedding is not None:
+                vecs, toks = await self._embedding.embed_records(spec, recs)
             replay[spec.name] = {
                 "recs": recs, "vecs": vecs, "toks": toks, "dels": dels,
                 "ds": [p.get(DS) for p in puts],

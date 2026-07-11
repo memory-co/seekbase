@@ -18,7 +18,7 @@ from ._types import Embedder, EmbedderInvalid, QueryError
 from .api.remote import HttpExecutor
 from .runtime import Bridge
 from .schema import parse_schema
-from .service import FileService, StoreService, build_services
+from .service import EmbeddingService, FileService, StoreService, build_services
 from .struct import Request, Row, Ticket
 
 
@@ -93,9 +93,11 @@ class Seekbase:
                 "schema declares searchable columns but no embedder was provided"
             )
         bridge = Bridge()
-        store = await StoreService.open(data_dir, parsed, bridge, embedder=embedder)
+        embedding = EmbeddingService(embedder) if has_searchable else None
+        dim = embedding.dim if embedding is not None else None
+        store = await StoreService.open(data_dir, parsed, bridge, dim=dim)
         files = FileService(bridge, data_dir / "files")
-        services = build_services(store, store.search, files, parsed)
+        services = build_services(store, embedding, files, parsed)
         executor = LocalExecutor(services, store, bridge)
         await executor.start()
         return cls(executor, services)

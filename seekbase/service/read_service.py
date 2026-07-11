@@ -1,9 +1,10 @@
 """ReadService — the read use case.
 
 Rewrite ``search(col, 'text')`` out of the SQL (the ``_search_*`` helpers below),
-run the hybrid (vss+fts) retrieval per search via SearchService, then hand the
-rewritten SQL + score results to StoreService to run against the visibility
-view. Mirrors ``api/query.py`` / docs/api/query.md.
+embed + tokenize each query text via EmbeddingService, run the hybrid (vss+fts)
+retrieval per search via ``StoreService.hybrid``, then hand the rewritten SQL +
+score results to ``StoreService.run_query`` against the visibility view. Mirrors
+``api/query.py`` / docs/api/query.md.
 
 The SQL-rewrite helpers are regex-based, with known edge cases (comments,
 ``search(col, ?)`` params) noted in docs/works/search.md §3 — a DuckDB-parser
@@ -56,9 +57,9 @@ def _search_target(schema: Schema, sql: str, col: str) -> str:
 
 
 class ReadService:
-    def __init__(self, store, search, schema) -> None:
+    def __init__(self, store, embedding, schema) -> None:
         self._store = store
-        self._search = search
+        self._embedding = embedding
         self._schema = schema
 
     async def query(
@@ -68,12 +69,14 @@ class ReadService:
         rewritten, specs = _extract_searches(sql)
         searches: list[tuple[str, str, list[tuple[str, float]]]] | None = None
         if specs:
-            if self._search is None:
+            if self._embedding is None:
                 raise QueryError("search() needs a searchable column + an embedder")
             searches = []
             for col, text, name in specs:
                 target = _search_target(self._schema, sql, col)
-                results = await self._search.hybrid(target, col, text, _SEARCH_K)
+                qvec = (await self._embedding.embed([text]))[0]
+                results = await self._store.hybrid(
+                    target, col, qvec, self._embedding.tok(text), _SEARCH_K)
                 searches.append((target, name, results))
         rows = await self._store.run_query(rewritten, list(params), ds_start, ds_end, searches)
         return {"rows": rows}

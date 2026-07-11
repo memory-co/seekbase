@@ -89,12 +89,12 @@ seekbase/                      # 仓库根
     _wire.py                   # Request 序列化 + 错误↔HTTP 状态码映射(client/server 共用)  [M1 已落]
     service/                   # 一切皆 service(engine 已化掉):每个文件都是 *_service.py
       # 领域服务(各自拥有一个子域,端到端)
-      store_service.py         #   StoreService —— DuckDB 结构化:建表/校验(列+dup-pk)/commit_rows/match_live/soft_delete/run_query
-      search_service.py        #   SearchService —— vss+fts:embed/jieba 分词/建索引/hybrid RRF(text 已并入)
+      store_service.py         #   StoreService —— DuckDB 单引擎:结构化 + vss + fts(建表/校验/commit_rows+FTS/hybrid/run_query)
+      embedding_service.py     #   EmbeddingService —— 文本→向量+token(包注入的 Embedder + jieba;api/本地切换在 embedders/)
       file_service.py          #   FileService —— canonical 文件镜像:**拥有落盘记录/墓碑形状**(write_puts/write_deletes/iter_events)
       # 用例服务(薄编排:只管跨子域的顺序 + 原子)
-      read_service.py          #   ReadService —— 读:search 改写(内含)→hybrid→store.run_query
-      write_service.py         #   WriteService —— insert/delete:store.validate→search.embed→files.write_puts→store.commit(~5 行)
+      read_service.py          #   ReadService —— 读:search 改写(内含)→embedding.embed→store.hybrid→store.run_query
+      write_service.py         #   WriteService —— insert/delete:store.validate→embedding.embed→files.write_puts→store.commit(~5 行)
       admin_service.py         #   AdminService —— rebuild:replay 文件镜像→重灌 store
       ticket_service.py        #   TicketService —— 写回执(issue/status)
       __init__.py              #   Services 装配(build_services)
@@ -106,7 +106,7 @@ seekbase/                      # 仓库根
     runtime/                   # 跨层基础设施(非 store、非用例)
       bridge.py                # async↔sync 桥(单写者:单线程持有唯一 DuckDB 连接,串行化)  [M1 已落]
       clock.py                 # 引擎时钟:ds(YYYYMMDD)/ created_at(ISO)统一格式
-      # 写同步:store.validate → search.embed_records → files.write_puts(files 先)→ store.commit_rows(INSERT+FTS 一个 bridge 块)
+      # 写同步:store.validate → embedding.embed_records → files.write_puts(files 先)→ store.commit_rows(INSERT+FTS 一个 bridge 块)
       # store 与 search 共享同一条 DuckDB 连接(单引擎);时光机 = store 可见性视图的单表 ds 谓词
     embedders/
       __init__.py              # Embedder 协议再导出
@@ -129,7 +129,7 @@ seekbase/                      # 仓库根
 
 > **测试组织照 memory.talk 的「按场景」路数**:每个场景一个目录,内含 `README.md`(测什么 / 不测什么 / fixture 来源)+ `test.py`;`python_files` 收 `test.py`。相关用例合并到一个场景下,跟「按代码模块切文件」解耦。
 
-**与 searchbase 的映射**:searchbase 的 LanceDB `local` 那摊(embed、ANN、维护协程,尤其**压缩 / EMFILE 恢复 / 连接重连**——都是为对付 LanceDB 版本化碎片文件的 fd 耗尽)**整体消失**:向量搬进 DuckDB 的 `vss`,全文用 `fts`,统一由 `service/search_service.py`(SearchService)管。单文件存储让 fd 数恒定,那套 EMFILE 恢复机械不再需要(见 §6.1)。searchbase 的端口 `SearchBackend` **不再对外**——上层只 import `seekbase.Seekbase`。
+**与 searchbase 的映射**:searchbase 的 LanceDB `local` 那摊(embed、ANN、维护协程,尤其**压缩 / EMFILE 恢复 / 连接重连**——都是为对付 LanceDB 版本化碎片文件的 fd 耗尽)**整体消失**:向量搬进 DuckDB 的 `vss`,全文用 `fts`,向量/全文都在 `StoreService` 的 DuckDB 引擎里,文本→向量/token 由 `EmbeddingService` 提供。单文件存储让 fd 数恒定,那套 EMFILE 恢复机械不再需要(见 §6.1)。searchbase 的端口 `SearchBackend` **不再对外**——上层只 import `seekbase.Seekbase`。
 
 ---
 
@@ -252,7 +252,7 @@ class NotFound(SeekbaseError): ...              # ticket 不存在 → 404
               Seekbase(client.py:门面 query/insert/delete)
                             │  用例服务 Write/Read/Admin 编排
         ┌───────────────────┴───────────────────┐
-   FileService                         StoreService(duck.db 单文件)+ SearchService
+   FileService                         StoreService(duck.db 单文件:结构化 + vss + fts)
    canonical 文件镜像            每业务表一张物理表 _sb_<表>(两个领域服务共享同一连接)
    每表 jsonl append      业务列 + ds/created_at/deleted_ds/deleted_at
                          + 每可搜列 _vec_<列>(vss/HNSW)/ _tok_<列>(fts/BM25)

@@ -15,17 +15,17 @@ client.py / server.py    两形态入口:open(嵌入)/ connect(远程) / seekbas
          │
          ▼
       service/  ── 用例服务(薄编排):query · write · admin(+ tickets · rewrite)
-                └ 领域服务(拥有子域):store(DuckDB 结构化)· search(vss+fts)· files(镜像)
+                └ 领域服务(拥有子域):store(DuckDB 引擎:结构化+vss+fts)· embedding(文本→向量/token)· files(镜像)
          │
          ▼
       struct/            贯穿各层的数据对象:Request · Ticket · Schema/TableSpec/Column · Row/Hit
       runtime/           基础设施:bridge(单写者)· clock(ds/created_at)
 ```
 
-- **领域服务拥有子域**:`FileService` 拥有落盘记录/墓碑的形状,`StoreService` 拥有列校验+dup-pk,`SearchService` 拥有 embed+分词——子域知识不再漏进上层。
+- **领域服务拥有子域**:`FileService` 拥有落盘记录/墓碑的形状,`StoreService` 是单 DuckDB 引擎(结构化+vss+fts+列校验),`EmbeddingService` 拥有 embed+分词——子域知识不再漏进上层。
 - **用例服务是薄编排**:`WriteService.insert` 只有 5 行,唯一职责是跨子域的**顺序+原子**(files 先于 db)——领域服务管不了这个(它不知道别的子域)。
 - **service 是唯一用例入口**:HTTP 走 `api/*.py` **直连** `db.services.*`;嵌入/远程走 `client → executor`,`LocalExecutor` 只把 `Request` 的 op 转发到同一批 service。两条路复用同一批 service,零重复。
-- `StoreService` 与 `SearchService` **共享同一条 DuckDB 连接**(单引擎):`commit_rows` 在一个 bridge 块里做 INSERT + FTS 重建。
+- `StoreService` 是**单 DuckDB 引擎**(结构化 + vss + fts 同一连接);`EmbeddingService` 是纯 provider(文本→向量/token),不碰 DuckDB。`commit_rows` 在一个 bridge 块里做 INSERT + FTS 重建。
 
 ## 2. 一次读(`search()` 查询)怎么流
 
@@ -35,7 +35,8 @@ Seekbase.query(sql)                                   # client.py:构造 Request
     → ReadService.query                              # service/read_service.py:薄编排
         rewrite.extract_searches(sql)                 #   search(col,'x') → 占位 + specs
         rewrite.search_target(...)                    #   定表
-        SearchService.hybrid(表,列,文本)             #   service/search_service.py:vss+fts RRF → [(pk,score)]
+        EmbeddingService.embed(查询文本) + tok        #   service/embedding_service.py:文本→向量/token
+        StoreService.hybrid(表,列,向量,token)         #   service/store_service.py:vss+fts RRF → [(pk,score)]
         StoreService.run_query(重写SQL, searches)     #   service/store_service.py:只读守卫 + 可见性视图 + join
   → {"rows": [...]}                                   # 逐层原样返回
 ```
@@ -48,7 +49,7 @@ HTTP 形态:`connect` 的 `HttpExecutor` 把 `Request` 序列化打到 `api/quer
 Seekbase.insert(table, rows)                          # client.py → Request(op=insert)
   → LocalExecutor.execute → WriteService.insert       # service/write_service.py:薄编排(~5 行,只管顺序+原子)
         StoreService.validate(...)                    #   store 拥有:列校验 + dup-pk(PK 约束兜底)
-        SearchService.embed_records(...)              #   search 拥有:内联 embed + jieba 分词
+        EmbeddingService.embed_records(...)           #   embedding 拥有:内联 embed + jieba 分词
         FileService.write_puts(...)                   #   file 拥有落盘形状;文件最先(canonical)
         StoreService.commit_rows(...)                 #   随行 INSERT(含 _vec/_tok)+ FTS 重建(一个 bridge 块)
         TicketService.issue("insert")                #   → struct.Ticket

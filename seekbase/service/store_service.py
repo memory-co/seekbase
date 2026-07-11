@@ -6,11 +6,12 @@ per searchable column, ``_vec_<col>`` (HNSW) and ``_tok_<col>`` (BM25). The
 primary key is write-once. It owns structured validation (unknown columns,
 dup-pk), the row primitives (``commit_rows`` / ``match_live`` / ``soft_delete``
 / ``clear``) and read (``run_query`` — read-only guard + visibility view +
-search-score joins). It shares its DuckDB connection with SearchService (single
-engine): ``commit_rows`` refreshes the touched FTS index in the same block.
+search-score joins) and the vss+fts indexes on those same tables — one
+DuckDB engine, one connection: ``commit_rows`` refreshes the touched FTS index
+in the same block; ``hybrid`` runs the RRF query (given a precomputed vector).
 
-The use-case services (write / query / admin) sequence StoreService with
-FileService and SearchService.
+The use-case services sequence StoreService with FileService and
+EmbeddingService (which turns text into the vectors/tokens the store persists).
 """
 from __future__ import annotations
 
@@ -24,12 +25,20 @@ import duckdb
 from .._types import QueryError, ReadOnlyError
 from ..runtime import Bridge
 from ..struct import CREATED_AT, DELETED_AT, DELETED_DS, DS, Schema, TableSpec
-from .search_service import SearchService, tokcol, veccol
 
 __all__ = ["StoreService"]
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DS_RE = re.compile(r"^\d{8}$")
+_SEARCH_K = 100          # candidates per arm (vss / fts) before RRF
+
+
+def veccol(col: str) -> str:
+    return f"_vec_{col}"
+
+
+def tokcol(col: str) -> str:
+    return f"_tok_{col}"
 
 
 def _ident(name: str) -> str:
@@ -60,25 +69,18 @@ class StoreService:
         self._conn = conn
         self._schema = schema
         self._dim = dim               # embedding dim, or None if nothing searchable
-        self._search: SearchService | None = None
 
     @classmethod
     async def open(
-        cls, data_dir: Path, schema: Schema, bridge: Bridge, embedder=None
+        cls, data_dir: Path, schema: Schema, bridge: Bridge, dim: int | None = None
     ) -> "StoreService":
         data_dir = Path(data_dir)
         conn = await bridge.run(lambda: duckdb.connect(str(data_dir / "duck.db")))
-        has_searchable = any(s.searchable for s in schema.tables)
-        dim = int(embedder.dim) if (embedder is not None and has_searchable) else None
         engine = cls(bridge, conn, schema, dim)
         await bridge.run(engine._create_tables)
         if dim is not None:
-            engine._search = await SearchService.create(bridge, conn, schema, embedder)
+            await bridge.run(engine._setup_search)   # vss + fts extensions + indexes
         return engine
-
-    @property
-    def search(self) -> SearchService | None:
-        return self._search
 
     @property
     def schema(self) -> Schema:
@@ -98,6 +100,66 @@ class StoreService:
             defs.append(f"PRIMARY KEY ({_ident(spec.primary_key)})")
             self._conn.execute(
                 f"CREATE TABLE IF NOT EXISTS {_phys(spec.name)} ({', '.join(defs)})")
+
+    # ─── vss + fts on the business tables (same connection, single engine) ─
+
+    def _setup_search(self) -> None:
+        for ext in ("vss", "fts"):
+            try:
+                self._conn.execute(f"INSTALL {ext}; LOAD {ext};")
+            except Exception:
+                self._conn.execute(f"LOAD {ext};")   # already installed offline
+        self._conn.execute("SET hnsw_enable_experimental_persistence=true;")
+        for spec in self._schema.tables:
+            if not spec.searchable:
+                continue
+            phys = f"_sb_{spec.name}"
+            for col in spec.searchable:
+                self._conn.execute(
+                    f'CREATE INDEX IF NOT EXISTS "{phys}_{col}_hnsw" ON "{phys}" '
+                    f"USING HNSW(\"{veccol(col)}\") WITH (metric='cosine')")
+            self._build_fts(spec)
+
+    def _build_fts(self, spec: TableSpec) -> None:
+        phys = f"_sb_{spec.name}"
+        cols = ", ".join(f"'{tokcol(c)}'" for c in spec.searchable)
+        self._conn.execute(
+            f"PRAGMA create_fts_index('{phys}', '{spec.primary_key}', {cols}, overwrite=1)")
+
+    def _rebuild_fts_inline(self, table: str) -> None:
+        """Refresh a table's BM25 index. Called inside an existing bridge block."""
+        spec = self._schema.table(table)
+        if spec.searchable:
+            self._build_fts(spec)
+
+    async def hybrid(self, table: str, col: str, qvec: list[float], qtok: str,
+                     k: int = _SEARCH_K) -> list[tuple[str, float]]:
+        """Fuse vss (cosine ANN over ``qvec``) + fts (BM25 over ``qtok``) by RRF
+        (k0=60) on the given column. The query vector/tokens are precomputed by
+        EmbeddingService; this is pure DuckDB."""
+        spec = self._schema.table(table)
+        phys = f"_sb_{table}"
+        pk = spec.primary_key
+        f = f"fts_main_{phys}"
+        vc, tc = veccol(col), tokcol(col)
+        sql = (
+            f'WITH v AS (SELECT pk, row_number() OVER (ORDER BY dd) rk FROM '
+            f'(SELECT "{pk}" pk, array_cosine_distance("{vc}", ?::FLOAT[{self._dim}]) dd '
+            f'FROM "{phys}" WHERE "{vc}" IS NOT NULL AND "deleted_ds" IS NULL '
+            f'ORDER BY dd LIMIT {k})), '
+            f"ff AS (SELECT pk, row_number() OVER (ORDER BY sc DESC) rk FROM "
+            f"(SELECT \"{pk}\" pk, {f}.match_bm25(\"{pk}\", ?, fields := '{tc}') sc "
+            f'FROM "{phys}" WHERE {f}.match_bm25("{pk}", ?, fields := \'{tc}\') IS NOT NULL '
+            f'AND "deleted_ds" IS NULL ORDER BY sc DESC LIMIT {k})) '
+            f"SELECT COALESCE(v.pk, ff.pk) pk, "
+            f"COALESCE(1.0/(60+v.rk),0)+COALESCE(1.0/(60+ff.rk),0) score "
+            f"FROM v FULL OUTER JOIN ff ON v.pk=ff.pk ORDER BY score DESC LIMIT {k}")
+
+        def _do():
+            return self._conn.execute(sql, [qvec, qtok, qtok]).fetchall()
+
+        rows = await self._bridge.run(_do)
+        return [(str(pk_), float(sc)) for pk_, sc in rows]
 
     # ─── per-request visibility view (time machine = ds filter) ────────
 
@@ -247,13 +309,13 @@ class StoreService:
         table's FTS index — in one bridge block, so a write settles atomically."""
         def _db() -> None:
             self._insert_rows(spec, records, vecs, toks, ds, now)
-            if rebuild_fts and self._search is not None:
-                self._search.rebuild_fts_inline(spec.name)
+            if rebuild_fts and self._dim is not None:
+                self._rebuild_fts_inline(spec.name)
         await self._bridge.run(_db)
 
     async def rebuild_fts(self, table: str) -> None:
-        if self._search is not None:
-            await self._bridge.run(lambda: self._search.rebuild_fts_inline(table))
+        if self._dim is not None:
+            await self._bridge.run(lambda: self._rebuild_fts_inline(table))
 
     async def match_live(self, table: str, where: str, params: list[Any]) -> list:
         """Primary keys of the currently-live rows matching ``where`` (used by
