@@ -1,16 +1,20 @@
-"""DuckdbEngine — the structured/analytical engine (append-only).
+"""DuckdbEngine — the single engine (structured + vss + fts).
 
-DuckDB storage is **insert-only, like the files**: every write is a new event
-row, never an UPDATE or REPLACE.
-- insert → a *put* event (business columns + ds + created_at, `_seq`).
-- delete → a *del* event (pk + deleted_ds + deleted_at, `_seq`); business
-  columns NULL, ds NULL.
-- re-insert of a pk → just another put event (a new version).
+One **physical table per business table**, ``_sb_<table>``: business columns +
+engine metadata (``ds`` / ``created_at`` / ``deleted_ds`` / ``deleted_at``) +,
+per searchable column, ``_vec_<col>`` (HNSW) and ``_tok_<col>`` (BM25). The
+primary key is **write-once**: re-inserting an existing key is rejected (so a
+row — and its vector — is set once and never updated, only soft-deleted).
 
-`query` reads a per-request **reconstruction view**: for each pk, take the
-latest event (`_seq`) whose day ≤ the horizon; the row is live iff that event is
-a put. This makes the time machine complete for arbitrary create/delete/re-
-insert histories, and query is strictly read-only.
+- insert → INSERT one row (business + ds/created_at + inline embedding/tokens).
+- delete → UPDATE ``deleted_ds`` / ``deleted_at`` on the row (soft delete).
+- query → a per-request view over the table with the visibility predicate
+  (``deleted_ds IS NULL`` now, or the ``ds`` / delete-horizon window for a time
+  machine). ``query`` is strictly read-only.
+
+Time machine = Hive-style ``ds`` partition filtering: a row is visible as-of
+``ds_end`` iff ``ds <= ds_end`` and it was not yet deleted then. No event log,
+no reconstruction — keys are write-once, so one row per key is the whole story.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ from .._types import QueryError, ReadOnlyError
 from ..schema import CREATED_AT, DELETED_AT, DELETED_DS, DS, Schema, TableSpec
 from .bridge import Bridge
 from .files import FileMirror
+from .search import SearchEngine, tokcol, veccol
 
 __all__ = ["DuckdbEngine", "extract_searches", "search_target"]
 
@@ -33,7 +38,6 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DS_RE = re.compile(r"^\d{8}$")
 _SEARCH_RE = re.compile(
     r"search\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*'((?:[^']|'')*)'\s*\)", re.IGNORECASE)
-_SEQ = "_seq"
 
 
 def _ident(name: str) -> str:
@@ -99,12 +103,14 @@ def search_target(schema: Schema, sql: str, col: str) -> str:
 
 
 class DuckdbEngine:
-    def __init__(self, bridge: Bridge, conn, schema: Schema, mirror: FileMirror) -> None:
+    def __init__(self, bridge: Bridge, conn, schema: Schema, mirror: FileMirror,
+                 dim: int | None) -> None:
         self._bridge = bridge
         self._conn = conn
         self._schema = schema
         self._mirror = mirror
-        self._search = None            # SearchEngine (vss+fts) or None if no searchable
+        self._dim = dim               # embedding dim, or None if nothing searchable
+        self._search: SearchEngine | None = None
 
     @classmethod
     async def open(
@@ -112,61 +118,50 @@ class DuckdbEngine:
     ) -> "DuckdbEngine":
         data_dir = Path(data_dir)
         conn = await bridge.run(lambda: duckdb.connect(str(data_dir / "duck.db")))
-        engine = cls(bridge, conn, schema, FileMirror(data_dir / "files"))
+        has_searchable = any(s.searchable for s in schema.tables)
+        dim = int(embedder.dim) if (embedder is not None and has_searchable) else None
+        engine = cls(bridge, conn, schema, FileMirror(data_dir / "files"), dim)
         await bridge.run(engine._create_tables)
-        if embedder is not None and any(s.searchable for s in schema.tables):
-            from .search import SearchEngine
-
+        if dim is not None:
             engine._search = await SearchEngine.create(bridge, conn, schema, embedder)
         return engine
 
     @property
-    def search(self):
-        """The vss+fts SearchEngine, or None when no column is searchable."""
+    def search(self) -> SearchEngine | None:
         return self._search
 
-    # ─── DDL (append-only event tables; no primary key, no update) ─────
+    # ─── DDL (one physical table per business table; write-once PK) ─────
 
     def _create_tables(self) -> None:
-        self._conn.execute("CREATE SEQUENCE IF NOT EXISTS _sb_row_seq")
         for spec in self._schema.tables:
-            cols = ", ".join(f"{_ident(c.name)} {c.sql_type}" for c in spec.columns)
+            defs = [f"{_ident(c.name)} {c.sql_type}" for c in spec.columns]
+            defs += [f"{_ident(DS)} VARCHAR", f"{_ident(CREATED_AT)} VARCHAR",
+                     f"{_ident(DELETED_DS)} VARCHAR", f"{_ident(DELETED_AT)} VARCHAR"]
+            if self._dim is not None:
+                for col in spec.searchable:
+                    defs.append(f"{_ident(veccol(col))} FLOAT[{self._dim}]")
+                    defs.append(f"{_ident(tokcol(col))} VARCHAR")
+            defs.append(f"PRIMARY KEY ({_ident(spec.primary_key)})")
             self._conn.execute(
-                f"CREATE TABLE IF NOT EXISTS {_phys(spec.name)} ("
-                f"{cols}, "
-                f"{_ident(DS)} VARCHAR, {_ident(CREATED_AT)} VARCHAR, "
-                f"{_ident(DELETED_DS)} VARCHAR, {_ident(DELETED_AT)} VARCHAR, "
-                f"{_ident(_SEQ)} BIGINT)"
-            )
-        self._conn.execute("CREATE SEQUENCE IF NOT EXISTS _sb_outbox_seq")
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS _sb_outbox ("
-            "seq BIGINT DEFAULT nextval('_sb_outbox_seq') PRIMARY KEY, "
-            "ticket VARCHAR, tbl VARCHAR, col VARCHAR, op VARCHAR, pk VARCHAR, "
-            "txt VARCHAR, state VARCHAR)"
-        )
+                f"CREATE TABLE IF NOT EXISTS {_phys(spec.name)} ({', '.join(defs)})")
 
-    # ─── reconstruction views (latest live version as of a horizon) ────
+    # ─── per-request visibility view (time machine = ds filter) ────────
 
-    def _reconstruction(self, spec: TableSpec, ds_start: str | None, ds_end: str | None) -> str:
-        pk = _ident(spec.primary_key)
-        cols = ", ".join(_ident(c) for c in spec.all_column_names)
-        horizon = ("" if ds_end is None
-                   else f"WHERE COALESCE({_ident(DS)}, {_ident(DELETED_DS)}) <= '{ds_end}'")
-        start = "" if ds_start is None else f" AND {_ident(DS)} >= '{ds_start}'"
-        return (
-            f"SELECT {cols} FROM ("
-            f"SELECT *, row_number() OVER (PARTITION BY {pk} ORDER BY {_ident(_SEQ)} DESC) AS _rn "
-            f"FROM (SELECT * FROM {_phys(spec.name)} {horizon})"
-            f") WHERE _rn = 1 AND {_ident(DS)} IS NOT NULL{start}"
-        )
+    def _visible(self, spec: TableSpec, ds_start: str | None, ds_end: str | None) -> str:
+        cols = ", ".join(_ident(c) for c in spec.all_column_names)   # business + meta only
+        conds: list[str] = []
+        if ds_end is None:
+            conds.append(f"{_ident(DELETED_DS)} IS NULL")            # current live state
+        else:                                                        # as-of ds_end
+            conds.append(f"{_ident(DS)} <= '{ds_end}'")
+            conds.append(f"({_ident(DELETED_DS)} IS NULL OR {_ident(DELETED_DS)} > '{ds_end}')")
+        if ds_start is not None:
+            conds.append(f"{_ident(DS)} >= '{ds_start}'")
+        return f"SELECT {cols} FROM {_phys(spec.name)} WHERE {' AND '.join(conds)}"
 
     def _install_views(
         self, ds_start: str | None, ds_end: str | None, searches: list | None = None
     ) -> None:
-        # searches: list of (table, score_name, tmp_table). Group by table; each
-        # table's view LEFT JOINs its searches and exposes _score_<col> (plus a
-        # bare _score alias when the whole query has exactly one search).
         searches = searches or []
         by_table: dict[str, list[tuple[str, str]]] = {}
         for table, name, tmp in searches:
@@ -174,7 +169,7 @@ class DuckdbEngine:
         single = len(searches) == 1
 
         for spec in self._schema.tables:
-            recon = self._reconstruction(spec, ds_start, ds_end)
+            base = self._visible(spec, ds_start, ds_end)
             ts = by_table.get(spec.name, [])
             if ts:
                 pk = _ident(spec.primary_key)
@@ -186,9 +181,9 @@ class DuckdbEngine:
                     scores.append(f"{a}.score AS {_ident(name)}")
                     if single:
                         scores.append(f"{a}.score AS _score")
-                body = f"SELECT base.*, {', '.join(scores)} FROM ({recon}) base {' '.join(joins)}"
+                body = f"SELECT base.*, {', '.join(scores)} FROM ({base}) base {' '.join(joins)}"
             else:
-                body = recon
+                body = base
             self._conn.execute(f"CREATE OR REPLACE TEMP VIEW {_ident(spec.name)} AS {body}")
 
     # ─── read ──────────────────────────────────────────────────────────
@@ -205,9 +200,6 @@ class DuckdbEngine:
         _check_ds("ds_end", ds_end)
 
         def _do() -> list[dict]:
-            # read-only guard via DuckDB's own statement-type detection — robust
-            # against `WITH … DELETE` and multi-statement bypasses that a
-            # first-token check misses.
             try:
                 stmts = self._conn.extract_statements(sql)
             except duckdb.Error as e:
@@ -236,65 +228,85 @@ class DuckdbEngine:
 
         return await self._bridge.run(_do)
 
-    # ─── write (append-only: put/del events, files-first) ──────────────
+    # ─── write (files-first; insert-once, soft-delete) ─────────────────
 
-    def _insert_puts(self, spec: TableSpec, records: list[dict]) -> None:
+    async def _embed_records(self, spec: TableSpec, records: list[dict]) -> tuple[dict, dict]:
+        """Inline embed + tokenize each searchable column. Returns
+        (vecs, toks): col -> list aligned with records (None where empty)."""
+        vecs: dict[str, list] = {}
+        toks: dict[str, list] = {}
+        if self._search is None:
+            return vecs, toks
+        for col in spec.searchable:
+            texts = [rec.get(col) for rec in records]
+            idx = [i for i, t in enumerate(texts) if t is not None and str(t) != ""]
+            emb = await self._search.embed([str(texts[i]) for i in idx]) if idx else []
+            cv: list = [None] * len(records)
+            ct: list = [None] * len(records)
+            for j, i in enumerate(idx):
+                cv[i] = emb[j]
+                ct[i] = self._search.tok(str(texts[i]))
+            vecs[col], toks[col] = cv, ct
+        return vecs, toks
+
+    def _insert_rows(self, spec: TableSpec, records: list[dict], vecs: dict, toks: dict,
+                     ds: str, now: str) -> None:
         json_cols = {c.name for c in spec.columns if c.type == "json"}
-        cols = [*spec.column_names, DS, CREATED_AT]
-        col_sql = ", ".join(_ident(c) for c in cols) + f", {_ident(_SEQ)}"
-        placeholders = ", ".join("?" * len(cols)) + ", nextval('_sb_row_seq')"
+        cols = [*spec.column_names, DS, CREATED_AT, DELETED_DS, DELETED_AT]
+        if self._dim is not None:
+            for col in spec.searchable:
+                cols += [veccol(col), tokcol(col)]
+        col_sql = ", ".join(_ident(c) for c in cols)
+        placeholders = ", ".join("?" * len(cols))
         sql = f"INSERT INTO {_phys(spec.name)} ({col_sql}) VALUES ({placeholders})"
         payload: list[list[Any]] = []
-        for rec in records:
-            values = []
+        for i, rec in enumerate(records):
+            vals: list[Any] = []
             for c in spec.column_names:
                 v = rec.get(c)
                 if c in json_cols and v is not None:
                     v = json.dumps(v)
-                values.append(v)
-            values += [rec.get(DS), rec.get(CREATED_AT)]
-            payload.append(values)
+                vals.append(v)
+            vals += [ds, now, None, None]
+            if self._dim is not None:
+                for col in spec.searchable:
+                    vals.append(vecs.get(col, [None] * len(records))[i])
+                    vals.append(toks.get(col, [None] * len(records))[i])
+            payload.append(vals)
         self._conn.executemany(sql, payload)
-
-    def _insert_dels(self, spec: TableSpec, keys: list, ds: str, deleted_at) -> None:
-        pk = spec.primary_key
-        sql = (f"INSERT INTO {_phys(spec.name)} "
-               f"({_ident(pk)}, {_ident(DELETED_DS)}, {_ident(DELETED_AT)}, {_ident(_SEQ)}) "
-               f"VALUES (?, ?, ?, nextval('_sb_row_seq'))")
-        self._conn.executemany(sql, [[k, ds, deleted_at] for k in keys])
-
-    def _enqueue(self, jobs: list[tuple]) -> None:
-        """Each job = (ticket, tbl, col, op, pk, txt)."""
-        if jobs:
-            self._conn.executemany(
-                "INSERT INTO _sb_outbox (ticket, tbl, col, op, pk, txt, state) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
-                [list(j) for j in jobs])
 
     async def insert(self, table: str, rows: list[dict], ticket: str) -> None:
         spec = self._schema.table(table)
         now, ds = _utc_now(), _today_ds()
+        pk = spec.primary_key
         records: list[dict] = []
         for row in rows:
             unknown = set(row) - set(spec.column_names)
             if unknown:
                 raise QueryError(f"{table}: unknown column(s) {sorted(unknown)}")
-            rec = {c: row.get(c) for c in spec.column_names}
-            rec.update({DS: ds, CREATED_AT: now, DELETED_DS: None, DELETED_AT: None})
-            records.append(rec)
+            records.append({c: row.get(c) for c in spec.column_names})
 
-        jobs = []
-        for rec in records:
-            for col in spec.searchable:                 # one vector per searchable column
-                v = rec.get(col)
-                if v is not None and str(v) != "":
-                    jobs.append((ticket, table, col, "upsert", str(rec[spec.primary_key]), str(v)))
+        keys = [str(r[pk]) for r in records]
+        if len(set(keys)) != len(keys):
+            raise QueryError(f"{table}: duplicate primary key within the insert batch")
+        existing = await self._bridge.run(lambda: self._conn.execute(
+            f"SELECT CAST({_ident(pk)} AS VARCHAR) FROM {_phys(table)} "
+            f"WHERE CAST({_ident(pk)} AS VARCHAR) IN ({', '.join('?' * len(keys))})",
+            keys).fetchall())
+        if existing:
+            raise QueryError(
+                f"{table}: primary key already exists: {existing[0][0]!r} "
+                f"(seekbase is insert-only; a key is written once)")
 
-        await self._bridge.run(lambda: [self._mirror.append(ds, table, r) for r in records])
+        vecs, toks = await self._embed_records(spec, records)
+        mrecs = [{**{c: rec[c] for c in spec.column_names}, DS: ds, CREATED_AT: now}
+                 for rec in records]
+        await self._bridge.run(lambda: [self._mirror.append(ds, table, m) for m in mrecs])
 
         def _db() -> None:
-            self._insert_puts(spec, records)
-            self._enqueue(jobs)
+            self._insert_rows(spec, records, vecs, toks, ds, now)
+            if self._search is not None:
+                self._search.rebuild_fts_inline(table)
 
         await self._bridge.run(_db)
 
@@ -306,67 +318,69 @@ class DuckdbEngine:
 
         def _do() -> int:
             try:
-                # evaluate `where` against the CURRENT live state
-                self._install_views(None, None, None)
+                self._install_views(None, None, None)   # match against current live state
                 cur = self._conn.execute(
                     f"SELECT {_ident(pk)} FROM {_ident(table)} WHERE ({stmt})", list(params))
                 keys = [r[0] for r in cur.fetchall()]
                 for k in keys:
                     self._mirror.append(ds, table, {"_deleted": k, DELETED_AT: now})
                 if keys:
-                    self._insert_dels(spec, keys, ds, now)
-                    self._enqueue([(ticket, table, col, "delete", str(k), None)
-                                   for k in keys for col in spec.searchable])
+                    ph = ", ".join("?" * len(keys))
+                    self._conn.execute(
+                        f"UPDATE {_phys(table)} SET {_ident(DELETED_DS)}=?, {_ident(DELETED_AT)}=? "
+                        f"WHERE CAST({_ident(pk)} AS VARCHAR) IN ({ph}) "
+                        f"AND {_ident(DELETED_DS)} IS NULL",
+                        [ds, now, *[str(k) for k in keys]])
                 return len(keys)
             except duckdb.Error as e:
                 raise QueryError(f"{table}: bad delete where: {e}") from e
 
         return await self._bridge.run(_do)
 
-    # ─── outbox (consumer-facing) ──────────────────────────────────────
-
-    async def outbox_fetch_pending(self, limit: int) -> list[tuple]:
-        return await self._bridge.run(lambda: self._conn.execute(
-            "SELECT seq, tbl, col, op, pk, txt FROM _sb_outbox WHERE state='pending' "
-            "ORDER BY seq LIMIT ?", [limit]).fetchall())
-
-    async def outbox_mark_done(self, seq: int) -> None:
-        await self._bridge.run(
-            lambda: self._conn.execute("UPDATE _sb_outbox SET state='done' WHERE seq=?", [seq]))
-
-    async def outbox_pending_count(self, ticket: str) -> int:
-        r = await self._bridge.run(lambda: self._conn.execute(
-            "SELECT count(*) FROM _sb_outbox WHERE ticket=? AND state='pending'", [ticket]
-        ).fetchone())
-        return int(r[0])
-
     # ─── rebuild (replay the file mirror in ds order) ──────────────────
 
     async def rebuild(self) -> dict:
+        result = {"tables": 0, "rows": 0, "tombstones": 0}
+        # 1) read events off the bridge (filesystem), then embed puts inline
+        replay: dict[str, dict] = {}
+        for spec in self._schema.tables:
+            puts, dels = [], []
+            for ds, rec in self._mirror.iter_events(spec.name):
+                if "_deleted" in rec:
+                    dels.append((str(rec["_deleted"]), ds, rec.get(DELETED_AT)))
+                else:
+                    puts.append(rec)
+            recs = [{c: p.get(c) for c in spec.column_names} for p in puts]
+            vecs, toks = await self._embed_records(spec, recs)
+            replay[spec.name] = {
+                "recs": recs, "vecs": vecs, "toks": toks, "dels": dels,
+                "ds": [p.get(DS) for p in puts],
+                "ca": [p.get(CREATED_AT) for p in puts],
+            }
+
         def _do() -> dict:
-            tables = rows = tombs = 0
             for spec in self._schema.tables:
                 self._conn.execute(f"DELETE FROM {_phys(spec.name)}")
-            self._conn.execute("DELETE FROM _sb_outbox")
-            if self._search is not None:
-                self._search.reset_inline()   # clear derived vec/fts; consumer refills
             for spec in self._schema.tables:
-                tables += 1
-                for ds, rec in self._mirror.iter_events(spec.name):
-                    if "_deleted" in rec:
-                        self._insert_dels(spec, [rec["_deleted"]], ds, rec.get(DELETED_AT))
-                        self._enqueue([("rebuild", spec.name, col, "delete", str(rec["_deleted"]), None)
-                                       for col in spec.searchable])
-                        tombs += 1
-                    else:
-                        self._insert_puts(spec, [rec])
-                        for col in spec.searchable:
-                            v = rec.get(col)
-                            if v is not None and str(v) != "":
-                                self._enqueue([("rebuild", spec.name, col, "upsert",
-                                                str(rec[spec.primary_key]), str(v))])
-                        rows += 1
-            return {"tables": tables, "rows": rows, "tombstones": tombs}
+                result["tables"] += 1
+                r = replay[spec.name]
+                for i, rec in enumerate(r["recs"]):
+                    self._insert_rows(
+                        spec, [rec],
+                        {c: [r["vecs"][c][i]] for c in r["vecs"]},
+                        {c: [r["toks"][c][i]] for c in r["toks"]},
+                        r["ds"][i], r["ca"][i] or _utc_now())
+                    result["rows"] += 1
+                for pk_val, dds, dat in r["dels"]:
+                    self._conn.execute(
+                        f"UPDATE {_phys(spec.name)} SET {_ident(DELETED_DS)}=?, {_ident(DELETED_AT)}=? "
+                        f"WHERE CAST({_ident(spec.primary_key)} AS VARCHAR)=? "
+                        f"AND {_ident(DELETED_DS)} IS NULL",
+                        [dds, dat, pk_val])
+                    result["tombstones"] += 1
+                if self._search is not None:
+                    self._search.rebuild_fts_inline(spec.name)
+            return result
 
         return await self._bridge.run(_do)
 

@@ -1,6 +1,9 @@
 """read_write — SQL 读 + 异步写 round-trip 场景. See README.md."""
 from __future__ import annotations
 
+import pytest
+
+from seekbase import QueryError
 from tests.conftest import open_db
 
 
@@ -23,11 +26,14 @@ async def test_batch_filters_order_limit(db):
     assert c["c"] == 2
 
 
-async def test_reinsert_same_key_is_latest_wins(db):
+async def test_reinsert_same_key_errors(db):
+    """Primary keys are write-once: re-inserting an existing key is rejected
+    at the (funnelled) write path; the original row is untouched."""
     await _seed(db, {"card_id": "c1", "issue": "v1", "kind": "k", "n": 1})
-    await _seed(db, {"card_id": "c1", "issue": "v2", "kind": "k", "n": 2})
+    with pytest.raises(QueryError):
+        await _seed(db, {"card_id": "c1", "issue": "v2", "kind": "k", "n": 2})
     rows = await db.query("SELECT issue, n FROM cards")
-    assert rows == [{"issue": "v2", "n": 2}]  # new version replaces old
+    assert rows == [{"issue": "v1", "n": 1}]  # original kept, re-insert rejected
 
 
 async def test_insert_ticket_settles_done(db):

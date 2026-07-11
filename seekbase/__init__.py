@@ -2,8 +2,8 @@
 first-class operator.
 
 Public surface: the ``Seekbase`` port, value types, the ``Embedder`` injection
-protocol, and the error hierarchy. Engines (DuckDB / LanceDB / files / outbox)
-live behind the port and are not exported.
+protocol, and the error hierarchy. The engine (DuckDB — structured + vss + fts —
+and the file mirror) lives behind the port and is not exported.
 """
 from __future__ import annotations
 

@@ -2,8 +2,8 @@
 
 DuckDB's ``fts`` splits on whitespace, which does not segment Chinese (no
 spaces). We pre-tokenize with **jieba** (search mode) into a space-joined token
-string that both the index (consumer) and the query (executor) share — so the
-same segmentation is applied on both sides. English/ASCII words pass through
+string that both the index side (insert) and the query side (search) share — so
+the same segmentation is applied on both. English/ASCII words pass through
 lowercased; whitespace tokens are dropped.
 """
 from __future__ import annotations

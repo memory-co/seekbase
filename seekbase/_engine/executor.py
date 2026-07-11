@@ -1,19 +1,15 @@
 """Executors — the seam between the two forms.
 
 ``LocalExecutor`` runs a Request against the in-process DuckdbEngine (whose
-``search`` is the vss+fts SearchEngine), and runs a background consumer that
-drains the outbox: embed + tokenize → write the DuckDB vector column (HNSW is
-incremental) → rebuild the touched FTS index. ``HttpExecutor`` calls the
-matching HTTP endpoint on a server.
+``search`` is the vss+fts SearchEngine). Writes are **synchronous**: insert
+embeds + tokenizes inline and writes the row (vector included) in one shot;
+there is no outbox/consumer. ``HttpExecutor`` calls the matching HTTP endpoint.
 
-Writes return a ticket; its state is derived from the outbox (``pending`` until
-the ticket's vector/FTS jobs are drained, else ``done``). Tables with no
-searchable column enqueue nothing → their tickets are ``done`` immediately.
+Writes still return a ticket for API symmetry, but it is ``done`` as soon as the
+call returns (the write, including its vectors, is already committed).
 """
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import uuid
 from typing import Any
 
@@ -35,12 +31,9 @@ class LocalExecutor:
         self._duck = duck
         self._search = duck.search           # vss+fts engine (or None)
         self._tickets: dict[str, dict] = {}
-        self._stop = False
-        self._consumer: asyncio.Task | None = None
 
     async def start(self) -> None:
-        if self._search is not None:
-            self._consumer = asyncio.create_task(self._consume())
+        return None                          # nothing async to spin up (writes are synchronous)
 
     @property
     def ready(self) -> bool:
@@ -53,21 +46,21 @@ class LocalExecutor:
         if op == "insert":
             ticket = _new_ticket()
             await self._duck.insert(req.table, list(req.rows), ticket)
-            return await self._ticket_result(ticket, "insert", {})
+            return self._ticket_result(ticket, "insert", {})
         if op == "delete":
             if not req.where:
                 raise QueryError("delete requires a where clause")
             ticket = _new_ticket()
             matched = await self._duck.tombstone(req.table, req.where, list(req.params), ticket)
-            return await self._ticket_result(ticket, "delete", {"matched": matched})
+            return self._ticket_result(ticket, "delete", {"matched": matched})
         if op == "status":
             meta = self._tickets.get(req.ticket)
             if meta is None:
                 raise NotFound(f"unknown ticket {req.ticket!r}")
-            return await self._status(meta)
+            return {**meta, "state": "done"}
         if op == "rebuild":
             stats = await self._duck.rebuild()
-            return await self._ticket_result(_new_ticket(), "rebuild", {"stats": stats})
+            return self._ticket_result(_new_ticket(), "rebuild", {"stats": stats})
         raise QueryError(f"unknown op {op!r}")
 
     async def _run_query(self, req: Request) -> list[dict]:
@@ -86,57 +79,13 @@ class LocalExecutor:
         return await self._duck.query(
             sql, list(req.params), req.ds_start, req.ds_end, searches=searches)
 
-    async def _ticket_result(self, ticket: str, op: str, extra: dict) -> dict:
+    def _ticket_result(self, ticket: str, op: str, extra: dict) -> dict:
         meta = {"ticket": ticket, "op": op, "error": None, **extra}
         self._tickets[ticket] = meta
-        return await self._status(meta)
-
-    async def _status(self, meta: dict) -> dict:
-        pending = await self._duck.outbox_pending_count(meta["ticket"])
-        return {**meta, "state": "done" if pending == 0 else "pending"}
-
-    async def _consume(self) -> None:
-        while not self._stop:
-            try:
-                jobs = await self._duck.outbox_fetch_pending(32)
-            except Exception:
-                await asyncio.sleep(0.05)
-                continue
-            if not jobs:
-                await asyncio.sleep(0.02)
-                continue
-            # 1) apply vector upserts/deletes (HNSW is incremental)
-            done_seqs: list[int] = []
-            affected: set[tuple[str, str]] = set()
-            for seq, tbl, col, op, pk, txt in jobs:
-                try:
-                    if op == "upsert":
-                        await self._search.upsert(tbl, col, pk, txt)
-                    else:
-                        await self._search.delete(tbl, col, pk)
-                    affected.add((tbl, col))
-                    done_seqs.append(seq)
-                except Exception:
-                    pass  # transient (e.g. embedder) → leave pending, retry next loop
-            # 2) FTS is a static snapshot → rebuild the touched (table,col) indexes
-            #    BEFORE marking done, so wait(ticket)→done implies search() sees it.
-            for tbl, col in affected:
-                try:
-                    await self._search.rebuild_fts(tbl, col)
-                except Exception:
-                    pass
-            for seq in done_seqs:
-                await self._duck.outbox_mark_done(seq)
-            if not done_seqs:
-                await asyncio.sleep(0.05)
+        return {**meta, "state": "done"}     # writes are synchronous → already settled
 
     async def close(self) -> None:
-        self._stop = True
-        if self._consumer is not None:
-            self._consumer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._consumer
-        await self._duck.close()          # closes the single connection (vss+fts included)
+        await self._duck.close()             # closes the single connection (vss+fts included)
         self._bridge.close()
 
 

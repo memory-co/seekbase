@@ -7,8 +7,8 @@ append-only, one line per write event:
 - delete → a tombstone ``{"_deleted": <pk>, "deleted_at": …}`` line in the
   delete-day partition.
 
-Files are canonical; DuckDB/LanceDB are derived and can be rebuilt by replaying
-these logs in ds order. Writes are serialized by the single-writer bridge, so
+Files are canonical; DuckDB (structured rows + vss/fts indexes) is derived and
+can be rebuilt by replaying these logs in ds order. Writes are serialized by the single-writer bridge, so
 appends don't interleave; each append is flushed + fsync'd.
 """
 from __future__ import annotations

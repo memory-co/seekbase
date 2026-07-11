@@ -30,7 +30,7 @@ async def test_insert_appends_full_row_line(tmp_path):
         assert len(recs) == 1
         r = recs[0]
         assert r["id"] == "n1" and r["text"] == "hello"
-        assert r["ds"] and r["created_at"] and r["deleted_ds"] is None  # full snapshot + meta
+        assert r["ds"] and r["created_at"] and "_deleted" not in r  # full snapshot + meta, a put
     finally:
         await db.close()
 
@@ -52,7 +52,6 @@ async def test_rebuild_restores_exact_state_from_files(tmp_path):
     db = await Seekbase.open(path, schema=SCHEMA)
     await db.wait(await db.insert("notes", [{"id": "n1", "text": "a"}, {"id": "n2", "text": "b"}]))
     await db.wait(await db.delete("notes", where="id = ?", params=["n1"]))
-    await db.wait(await db.insert("notes", {"id": "n2", "text": "b2"}))  # new version
     await db.close()
 
     # wipe the derived DuckDB; reopen sees nothing until rebuild
@@ -66,6 +65,6 @@ async def test_rebuild_restores_exact_state_from_files(tmp_path):
         assert st["state"] == "done"
 
         rows = await db2.query("SELECT id, text FROM notes ORDER BY id")
-        assert rows == [{"id": "n2", "text": "b2"}]   # n1 deleted, n2 latest-wins
+        assert rows == [{"id": "n2", "text": "b"}]   # n1 deleted (soft), n2 survives
     finally:
         await db2.close()
