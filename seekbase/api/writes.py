@@ -5,13 +5,11 @@ Writes are synchronous, so a known ticket is always ``done``; an unknown ticket
 """
 from __future__ import annotations
 
-from .._engine.plan import Request
 from ._route import Endpoint
 
 
 async def handle(db, body: dict, params: dict) -> tuple[int, dict]:
-    req = Request(op="status", ticket=params["ticket"])
-    return 200, await db._dispatch(req)
+    return 200, db.services.tickets.status(params["ticket"])
 
 
 ENDPOINT = Endpoint("GET", "/v1/writes/{ticket}", handle)

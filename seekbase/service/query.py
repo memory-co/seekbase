@@ -22,7 +22,7 @@ class QueryService:
 
     async def query(
         self, sql: str | None, params, ds_start: str | None, ds_end: str | None
-    ) -> list[dict]:
+    ) -> dict:
         sql = sql or ""
         rewritten, specs = extract_searches(sql)
         searches: list[tuple[str, str, list[tuple[str, float]]]] | None = None
@@ -34,5 +34,5 @@ class QueryService:
                 target = search_target(self._schema, sql, col)
                 results = await self._search.hybrid(target, col, text, _SEARCH_K)
                 searches.append((target, name, results))
-        return await self._duck.run_query(
-            rewritten, list(params), ds_start, ds_end, searches)
+        rows = await self._duck.run_query(rewritten, list(params), ds_start, ds_end, searches)
+        return {"rows": rows}

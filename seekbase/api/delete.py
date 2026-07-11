@@ -5,18 +5,12 @@ Delete is a tombstone: it stamps ``deleted_ds`` / ``deleted_at`` on the row
 """
 from __future__ import annotations
 
-from .._engine.plan import Request
 from ._route import Endpoint
 
 
 async def handle(db, body: dict, params: dict) -> tuple[int, dict]:
-    req = Request(
-        op="delete",
-        table=body.get("table"),
-        where=body.get("where"),
-        params=tuple(body.get("params") or ()),
-    )
-    return 200, await db._dispatch(req)
+    return 200, await db.services.write.delete(
+        body.get("table"), body.get("where"), body.get("params") or [])
 
 
 ENDPOINT = Endpoint("POST", "/v1/delete", handle)

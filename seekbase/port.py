@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 from ._engine.bridge import Bridge
 from ._engine.duck import DuckdbEngine
@@ -27,9 +26,17 @@ from .service import build_services
 class Seekbase:
     """A supabase-style data port — embedded (``open``) or remote (``connect``)."""
 
-    def __init__(self, executor) -> None:
+    def __init__(self, executor, services=None) -> None:
         self._exec = executor
+        self._services = services     # local use-case services (None when connected remotely)
         self._closed = False
+
+    @property
+    def services(self):
+        """The in-process service layer (query/write/admin/tickets). Present for
+        an embedded ``open``ed db; ``None`` for a remote ``connect``. The HTTP
+        server (which always wraps an embedded db) calls these directly."""
+        return self._services
 
     # ─── open / connect ────────────────────────────────────────────────
 
@@ -55,7 +62,7 @@ class Seekbase:
         services = build_services(duck, duck.search, files, bridge, parsed)
         executor = LocalExecutor(bridge, services, duck)
         await executor.start()
-        return cls(executor)
+        return cls(executor, services)
 
     @classmethod
     async def connect(
@@ -130,7 +137,3 @@ class Seekbase:
 
     async def __aexit__(self, *exc) -> None:
         await self.close()
-
-    # used by the server handler to reach the executor directly
-    async def _dispatch(self, req: Request) -> Any:
-        return await self._exec.execute(req)

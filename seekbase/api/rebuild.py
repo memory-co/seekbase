@@ -5,12 +5,11 @@ from them. See docs/api/admin.md.
 """
 from __future__ import annotations
 
-from .._engine.plan import Request
 from ._route import Endpoint
 
 
 async def handle(db, body: dict, params: dict) -> tuple[int, dict]:
-    return 200, await db._dispatch(Request(op="rebuild"))
+    return 200, await db.services.admin.rebuild()
 
 
 ENDPOINT = Endpoint("POST", "/v1/rebuild", handle)

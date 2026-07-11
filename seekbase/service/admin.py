@@ -11,12 +11,13 @@ from ..schema import CREATED_AT, DELETED_AT, DS
 
 
 class AdminService:
-    def __init__(self, duck, search, files, bridge, schema) -> None:
+    def __init__(self, duck, search, files, bridge, schema, tickets) -> None:
         self._duck = duck
         self._search = search
         self._files = files
         self._bridge = bridge
         self._schema = schema
+        self._tickets = tickets
 
     async def rebuild(self) -> dict:
         result = {"tables": 0, "rows": 0, "tombstones": 0}
@@ -57,4 +58,4 @@ class AdminService:
                 await self._duck.soft_delete(spec.name, [pk_val], dds, dat)
                 result["tombstones"] += 1
             await self._duck.rebuild_fts(spec.name)
-        return result
+        return self._tickets.issue("rebuild", {"stats": result})

@@ -6,19 +6,12 @@ See docs/api/query.md.
 """
 from __future__ import annotations
 
-from .._engine.plan import Request
 from ._route import Endpoint
 
 
 async def handle(db, body: dict, params: dict) -> tuple[int, dict]:
-    req = Request(
-        op="query",
-        sql=body.get("sql"),
-        params=tuple(body.get("params") or ()),
-        ds_start=body.get("ds_start"),
-        ds_end=body.get("ds_end"),
-    )
-    return 200, await db._dispatch(req)
+    return 200, await db.services.query.query(
+        body.get("sql"), body.get("params") or [], body.get("ds_start"), body.get("ds_end"))
 
 
 ENDPOINT = Endpoint("POST", "/v1/query", handle)

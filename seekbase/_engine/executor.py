@@ -1,22 +1,19 @@
 """Executors — the seam between the two forms.
 
-``LocalExecutor`` dispatches a ``Request`` to the in-process service layer
-(query / write / admin) and turns write results into tickets. ``HttpExecutor``
-sends the same ``Request`` to the matching HTTP endpoint on a server.
+``LocalExecutor`` is a thin forwarder: it maps a ``Request``'s op to the matching
+service method and returns whatever the service returns (the full response —
+rows / ticket dict). It exists so the embedded port can stay transport-agnostic
+(``open`` gets a LocalExecutor, ``connect`` gets an HttpExecutor). The HTTP
+``api/`` handlers call the same services directly — no op indirection there.
 
-Writes are synchronous, so a ticket is ``done`` as soon as the call returns.
+``HttpExecutor`` sends the same ``Request`` to the matching HTTP endpoint.
 """
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
-from .._types import NotFound, QueryError
+from .._types import QueryError
 from .bridge import Bridge
-
-
-def _new_ticket() -> str:
-    return "wr_" + uuid.uuid4().hex[:16]
 
 
 class LocalExecutor:
@@ -24,7 +21,6 @@ class LocalExecutor:
         self._bridge = bridge
         self._svc = services
         self._duck = duck                    # held for lifecycle (close) only
-        self._tickets: dict[str, dict] = {}
 
     async def start(self) -> None:
         return None                          # nothing async to spin up (writes are synchronous)
@@ -36,30 +32,16 @@ class LocalExecutor:
     async def execute(self, req) -> Any:
         op = req.op
         if op == "query":
-            rows = await self._svc.query.query(req.sql, req.params, req.ds_start, req.ds_end)
-            return {"rows": rows}
+            return await self._svc.query.query(req.sql, req.params, req.ds_start, req.ds_end)
         if op == "insert":
-            await self._svc.write.insert(req.table, list(req.rows))
-            return self._ticket_result(_new_ticket(), "insert", {})
+            return await self._svc.write.insert(req.table, list(req.rows))
         if op == "delete":
-            if not req.where:
-                raise QueryError("delete requires a where clause")
-            matched = await self._svc.write.delete(req.table, req.where, list(req.params))
-            return self._ticket_result(_new_ticket(), "delete", {"matched": matched})
+            return await self._svc.write.delete(req.table, req.where, list(req.params))
         if op == "status":
-            meta = self._tickets.get(req.ticket)
-            if meta is None:
-                raise NotFound(f"unknown ticket {req.ticket!r}")
-            return {**meta, "state": "done"}
+            return self._svc.tickets.status(req.ticket)
         if op == "rebuild":
-            stats = await self._svc.admin.rebuild()
-            return self._ticket_result(_new_ticket(), "rebuild", {"stats": stats})
+            return await self._svc.admin.rebuild()
         raise QueryError(f"unknown op {op!r}")
-
-    def _ticket_result(self, ticket: str, op: str, extra: dict) -> dict:
-        meta = {"ticket": ticket, "op": op, "error": None, **extra}
-        self._tickets[ticket] = meta
-        return {**meta, "state": "done"}     # writes are synchronous → already settled
 
     async def close(self) -> None:
         await self._duck.close()             # closes the single connection (vss+fts included)
