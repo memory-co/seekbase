@@ -1,14 +1,8 @@
 """seekbase server — exposes an embedded ``Seekbase`` over HTTP.
 
-A minimal hand-rolled ASGI app (no web-framework dependency). Routes mirror
-docs/api/:
-
-  POST /v1/query            read (SQL + ds window) → {"rows": [...]}
-  POST /v1/insert           write → {"ticket", "state", ...}
-  POST /v1/delete           write → {"ticket", "state", "matched", ...}
-  GET  /v1/writes/{ticket}  poll write status
-  POST /v1/rebuild          admin (async ticket)
-  GET  /v1/health           {"ready": bool}
+A minimal hand-rolled ASGI shell (no web-framework dependency): auth, body
+read/write, error mapping, and dispatch to the endpoint modules in
+``seekbase/api/`` (one file per route — that directory *is* the API surface).
 
 ``seekbase_server(db)`` returns the ASGI app; the runner (uvicorn/…) is external
 (``serve`` is a convenience). Auth is one optional bearer token.
@@ -17,9 +11,9 @@ from __future__ import annotations
 
 import json
 
-from ._engine.plan import Request
 from ._types import SeekbaseError
 from ._wire import error_body, status_for
+from .api import resolve
 from .port import Seekbase
 
 
@@ -40,26 +34,9 @@ async def _send_json(send, status: int, obj) -> None:
     await send({"type": "http.response.body", "body": data})
 
 
-def _request_for(method: str, path: str, body: dict) -> Request:
-    if method == "POST" and path == "/v1/query":
-        return Request(op="query", sql=body.get("sql"),
-                       params=tuple(body.get("params") or ()),
-                       ds_start=body.get("ds_start"), ds_end=body.get("ds_end"))
-    if method == "POST" and path == "/v1/insert":
-        return Request(op="insert", table=body.get("table"),
-                       rows=tuple(body.get("rows") or ()))
-    if method == "POST" and path == "/v1/delete":
-        return Request(op="delete", table=body.get("table"),
-                       where=body.get("where"), params=tuple(body.get("params") or ()))
-    if method == "POST" and path == "/v1/rebuild":
-        return Request(op="rebuild")
-    if method == "GET" and path.startswith("/v1/writes/"):
-        return Request(op="status", ticket=path[len("/v1/writes/"):])
-    return None
-
-
 def seekbase_server(db: Seekbase, *, api_key: str | None = None):
-    """Build an ASGI app serving ``db`` (a normal embedded Seekbase)."""
+    """Build an ASGI app serving ``db`` (a normal embedded Seekbase). Routing +
+    per-endpoint logic live in ``seekbase/api/``; this shell just wires them."""
 
     async def app(scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -73,20 +50,18 @@ def seekbase_server(db: Seekbase, *, api_key: str | None = None):
                     send, 401, {"error": {"type": "Unauthorized", "message": "bad api key"}}
                 )
 
-        if method == "GET" and path == "/v1/health":
-            return await _send_json(send, 200, {"ready": db.ready})
-
-        req = _request_for(method, path, await _read_json(receive) if method == "POST" else {})
-        if req is None:
+        endpoint, params = resolve(method, path)
+        if endpoint is None:
             return await _send_json(send, 404, {"error": {"type": "NotFound", "message": path}})
 
+        body = await _read_json(receive) if method == "POST" else {}
         try:
-            result = await db._dispatch(req)
+            status, result = await endpoint.handle(db, body, params)
         except SeekbaseError as e:
             return await _send_json(send, status_for(e), {"error": error_body(e)})
         except Exception as e:  # noqa: BLE001 - last-resort guard
             return await _send_json(send, 500, {"error": {"type": "Internal", "message": str(e)}})
-        return await _send_json(send, 200, result)
+        return await _send_json(send, status, result)
 
     return app
 
