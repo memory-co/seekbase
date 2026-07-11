@@ -81,7 +81,7 @@ async def test_time_travel_across_create_and_delete(tmp_path):
     await bridge.run(_seed)
 
     async def q(ds_end):
-        return await eng.query("SELECT id, text FROM notes", [], None, ds_end)
+        return await eng.run_query("SELECT id, text FROM notes", [], None, ds_end)
 
     try:
         assert await q("20260101") == []                            # day1: not created yet

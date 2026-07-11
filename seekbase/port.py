@@ -17,9 +17,11 @@ from typing import Any
 from ._engine.bridge import Bridge
 from ._engine.duck import DuckdbEngine
 from ._engine.executor import HttpExecutor, LocalExecutor
+from ._engine.files import FileMirror
 from ._engine.plan import Request, Row
 from ._types import Embedder, EmbedderInvalid
 from .schema import parse_schema
+from .service import build_services
 
 
 class Seekbase:
@@ -48,8 +50,10 @@ class Seekbase:
                 "schema declares searchable columns but no embedder was provided"
             )
         bridge = Bridge()
+        files = FileMirror(data_dir / "files")
         duck = await DuckdbEngine.open(data_dir, parsed, bridge, embedder=embedder)
-        executor = LocalExecutor(bridge, duck)
+        services = build_services(duck, duck.search, files, bridge, parsed)
+        executor = LocalExecutor(bridge, services, duck)
         await executor.start()
         return cls(executor)
 

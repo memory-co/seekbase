@@ -94,6 +94,24 @@ class SearchEngine:
     def tok(self, s: str) -> str:
         return text.tokens(s)
 
+    async def embed_records(self, spec, records: list[dict]) -> tuple[dict, dict]:
+        """Inline embed + tokenize each searchable column across ``records``.
+        Returns (vecs, toks): col -> list aligned with records (None where the
+        column's value is empty). Used by the write / rebuild paths."""
+        vecs: dict[str, list] = {}
+        toks: dict[str, list] = {}
+        for col in spec.searchable:
+            texts = [rec.get(col) for rec in records]
+            idx = [i for i, t in enumerate(texts) if t is not None and str(t) != ""]
+            emb = await self.embed([str(texts[i]) for i in idx]) if idx else []
+            cv: list = [None] * len(records)
+            ct: list = [None] * len(records)
+            for j, i in enumerate(idx):
+                cv[i] = emb[j]
+                ct[i] = self.tok(str(texts[i]))
+            vecs[col], toks[col] = cv, ct
+        return vecs, toks
+
     # ─── query: RRF(vss, fts) directly on the business table ───────────
     async def hybrid(self, table: str, col: str, text_: str, k: int = _K) -> list[tuple[str, float]]:
         vec = (await self.embed([text_]))[0]

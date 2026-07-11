@@ -1,12 +1,10 @@
 """Executors — the seam between the two forms.
 
-``LocalExecutor`` runs a Request against the in-process DuckdbEngine (whose
-``search`` is the vss+fts SearchEngine). Writes are **synchronous**: insert
-embeds + tokenizes inline and writes the row (vector included) in one shot;
-there is no outbox/consumer. ``HttpExecutor`` calls the matching HTTP endpoint.
+``LocalExecutor`` dispatches a ``Request`` to the in-process service layer
+(query / write / admin) and turns write results into tickets. ``HttpExecutor``
+sends the same ``Request`` to the matching HTTP endpoint on a server.
 
-Writes still return a ticket for API symmetry, but it is ``done`` as soon as the
-call returns (the write, including its vectors, is already committed).
+Writes are synchronous, so a ticket is ``done`` as soon as the call returns.
 """
 from __future__ import annotations
 
@@ -15,10 +13,6 @@ from typing import Any
 
 from .._types import NotFound, QueryError
 from .bridge import Bridge
-from .duck import DuckdbEngine, extract_searches, search_target
-from .plan import Request
-
-_SEARCH_K = 100
 
 
 def _new_ticket() -> str:
@@ -26,10 +20,10 @@ def _new_ticket() -> str:
 
 
 class LocalExecutor:
-    def __init__(self, bridge: Bridge, duck: DuckdbEngine) -> None:
+    def __init__(self, bridge: Bridge, services, duck) -> None:
         self._bridge = bridge
-        self._duck = duck
-        self._search = duck.search           # vss+fts engine (or None)
+        self._svc = services
+        self._duck = duck                    # held for lifecycle (close) only
         self._tickets: dict[str, dict] = {}
 
     async def start(self) -> None:
@@ -39,45 +33,28 @@ class LocalExecutor:
     def ready(self) -> bool:
         return True
 
-    async def execute(self, req: Request) -> Any:
+    async def execute(self, req) -> Any:
         op = req.op
         if op == "query":
-            return {"rows": await self._run_query(req)}
+            rows = await self._svc.query.query(req.sql, req.params, req.ds_start, req.ds_end)
+            return {"rows": rows}
         if op == "insert":
-            ticket = _new_ticket()
-            await self._duck.insert(req.table, list(req.rows), ticket)
-            return self._ticket_result(ticket, "insert", {})
+            await self._svc.write.insert(req.table, list(req.rows))
+            return self._ticket_result(_new_ticket(), "insert", {})
         if op == "delete":
             if not req.where:
                 raise QueryError("delete requires a where clause")
-            ticket = _new_ticket()
-            matched = await self._duck.tombstone(req.table, req.where, list(req.params), ticket)
-            return self._ticket_result(ticket, "delete", {"matched": matched})
+            matched = await self._svc.write.delete(req.table, req.where, list(req.params))
+            return self._ticket_result(_new_ticket(), "delete", {"matched": matched})
         if op == "status":
             meta = self._tickets.get(req.ticket)
             if meta is None:
                 raise NotFound(f"unknown ticket {req.ticket!r}")
             return {**meta, "state": "done"}
         if op == "rebuild":
-            stats = await self._duck.rebuild()
+            stats = await self._svc.admin.rebuild()
             return self._ticket_result(_new_ticket(), "rebuild", {"stats": stats})
         raise QueryError(f"unknown op {op!r}")
-
-    async def _run_query(self, req: Request) -> list[dict]:
-        sql = req.sql or ""
-        rewritten, specs = extract_searches(sql)
-        searches = None
-        if specs:
-            if self._search is None:
-                raise QueryError("search() needs a searchable column + an embedder")
-            searches = []
-            for col, text, name in specs:
-                target = search_target(self._duck.schema, sql, col)
-                results = await self._search.hybrid(target, col, text, _SEARCH_K)
-                searches.append((target, name, results))
-            sql = rewritten
-        return await self._duck.query(
-            sql, list(req.params), req.ds_start, req.ds_end, searches=searches)
 
     def _ticket_result(self, ticket: str, op: str, extra: dict) -> dict:
         meta = {"ticket": ticket, "op": op, "error": None, **extra}
