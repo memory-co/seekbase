@@ -63,7 +63,7 @@ async def test_time_travel_across_create_and_delete(tmp_path):
     """
     from seekbase.runtime import Bridge
     from seekbase.schema import parse_schema
-    from seekbase.service.store import StoreService
+    from seekbase.service.store_service import StoreService
 
     bridge = Bridge()
     schema = parse_schema([{

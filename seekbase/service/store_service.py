@@ -24,7 +24,7 @@ import duckdb
 from .._types import QueryError, ReadOnlyError
 from ..runtime import Bridge
 from ..struct import CREATED_AT, DELETED_AT, DELETED_DS, DS, Schema, TableSpec
-from .search import SearchService, tokcol, veccol
+from .search_service import SearchService, tokcol, veccol
 
 __all__ = ["StoreService"]
 
@@ -182,7 +182,7 @@ class StoreService:
 
         return await self._bridge.run(_do)
 
-    # ─── write primitives (orchestrated by service/write + service/admin) ─
+    # ─── write primitives (orchestrated by write_service / admin_service) ─
 
     async def validate(self, table: str, rows: list[dict]) -> list[dict]:
         """Validate rows for insert — unknown columns + write-once primary key

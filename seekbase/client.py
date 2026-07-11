@@ -12,13 +12,51 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
-from ._types import Embedder, EmbedderInvalid
+from ._types import Embedder, EmbedderInvalid, QueryError
 from .api.remote import HttpExecutor
 from .runtime import Bridge
 from .schema import parse_schema
-from .service import FileService, LocalExecutor, StoreService, build_services
+from .service import FileService, StoreService, build_services
 from .struct import Request, Row, Ticket
+
+
+class LocalExecutor:
+    """The local execution seam: map a ``Request``'s op to a service method and
+    return what the service returns (``{"rows": …}`` / a ``Ticket``). The remote
+    counterpart is ``api/remote.HttpExecutor``; ``Seekbase`` holds one or the
+    other so its methods stay transport-agnostic."""
+
+    def __init__(self, services, store, bridge) -> None:
+        self._svc = services
+        self._store = store              # held for lifecycle (close) only
+        self._bridge = bridge
+
+    async def start(self) -> None:
+        return None                      # writes are synchronous — nothing to spin up
+
+    @property
+    def ready(self) -> bool:
+        return True
+
+    async def execute(self, req) -> Any:
+        op = req.op
+        if op == "query":
+            return await self._svc.read.query(req.sql, req.params, req.ds_start, req.ds_end)
+        if op == "insert":
+            return await self._svc.write.insert(req.table, list(req.rows))
+        if op == "delete":
+            return await self._svc.write.delete(req.table, req.where, list(req.params))
+        if op == "status":
+            return self._svc.tickets.status(req.ticket)
+        if op == "rebuild":
+            return await self._svc.admin.rebuild()
+        raise QueryError(f"unknown op {op!r}")
+
+    async def close(self) -> None:
+        await self._store.close()        # closes the single DuckDB connection (vss+fts)
+        self._bridge.close()
 
 
 class Seekbase:

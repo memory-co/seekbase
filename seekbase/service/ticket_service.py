@@ -1,4 +1,4 @@
-"""TicketRegistry — hands out and looks up write tickets.
+"""TicketService — hands out and looks up write tickets.
 
 Writes are synchronous, so a ticket is ``done`` the moment it is issued. The
 registry exists only so ``status`` can tell a known ticket (→ the Ticket) from
@@ -13,7 +13,7 @@ from .._types import NotFound
 from ..struct import Ticket
 
 
-class TicketRegistry:
+class TicketService:
     def __init__(self) -> None:
         self._tickets: dict[str, Ticket] = {}
 

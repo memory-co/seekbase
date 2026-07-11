@@ -89,7 +89,7 @@ LEFT JOIN _sb_s_0 _s0 ON CAST(base.card_id AS VARCHAR) = _s0.pk
 `search(列, '文本')` 出现时,executor:① 把文本 embed 成向量、jieba 分词成 token;② 直接在业务表 `_sb_<表>` 的 `_vec_<列>`/`_tok_<列>` 上分别取 vss / fts 的 top-k;③ 用 **RRF(reciprocal rank fusion)** 融合:
 
 ```sql
--- 概念形态(实际在 service/search.py 的 SearchService;D = _sb_<表>,F = fts_main_<D>):
+-- 概念形态(实际在 service/search_service.py 的 SearchService;D = _sb_<表>,F = fts_main_<D>):
 WITH v AS (SELECT pk, row_number() OVER (ORDER BY d)      rk FROM
               (SELECT <主键> pk, array_cosine_distance(_vec_<列>, $qvec) d
                FROM D WHERE _vec_<列> IS NOT NULL AND deleted_ds IS NULL
@@ -112,7 +112,7 @@ FROM v FULL OUTER JOIN f ON v.pk=f.pk ORDER BY score DESC LIMIT k
 
 DuckDB 的 `fts` 按**空白**切词,切不动没有空格的中文。所以 BM25 前先用 **jieba**(search 模式 `lcut_for_search`)把文本切成空格分隔的 token:
 
-- **索引侧与查询侧同一套切词**:insert 时写 `_tok_<列>`、`search()` 前切查询串,都走 `service/search.py` 里同一个 jieba 分词函数。
+- **索引侧与查询侧同一套切词**:insert 时写 `_tok_<列>`、`search()` 前切查询串,都走 `service/search_service.py` 里同一个 jieba 分词函数。
 - ASCII 词原样小写、空白 token 丢掉;中文按 jieba 词典切。
 - `jieba` 是纯 Python、无 C 依赖,已进核心依赖(见 [../../DESIGN.md](../../DESIGN.md) §2)。
 

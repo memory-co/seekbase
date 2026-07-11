@@ -11,7 +11,7 @@ client.py / server.py    两形态入口:open(嵌入)/ connect(远程) / seekbas
   │
   ├── api/               HTTP 协议两半:端点(query/insert/…)+ remote.py(HttpExecutor 客户端)
   │      直接调 →
-  └── service/dispatch   LocalExecutor:op→service 薄转发(让 client 传输无关)
+  └── client.py       LocalExecutor:op→service 薄转发(让 client 传输无关)
          │
          ▼
       service/  ── 用例服务(薄编排):query · write · admin(+ tickets · rewrite)
@@ -31,27 +31,27 @@ client.py / server.py    两形态入口:open(嵌入)/ connect(远程) / seekbas
 
 ```
 Seekbase.query(sql)                                   # client.py:构造 Request(op=query)
-  → LocalExecutor.execute                             # service/dispatch.py:op→service
-    → QueryService.query                              # service/query.py:薄编排
+  → LocalExecutor.execute                             # client.py(LocalExecutor):op→service
+    → ReadService.query                              # service/read_service.py:薄编排
         rewrite.extract_searches(sql)                 #   search(col,'x') → 占位 + specs
         rewrite.search_target(...)                    #   定表
-        SearchService.hybrid(表,列,文本)             #   service/search.py:vss+fts RRF → [(pk,score)]
-        StoreService.run_query(重写SQL, searches)     #   service/store.py:只读守卫 + 可见性视图 + join
+        SearchService.hybrid(表,列,文本)             #   service/search_service.py:vss+fts RRF → [(pk,score)]
+        StoreService.run_query(重写SQL, searches)     #   service/store_service.py:只读守卫 + 可见性视图 + join
   → {"rows": [...]}                                   # 逐层原样返回
 ```
 
-HTTP 形态:`connect` 的 `HttpExecutor` 把 `Request` 序列化打到 `api/query.py`,后者调**同一个** `QueryService.query`——即上图从 QueryService 起完全一致。
+HTTP 形态:`connect` 的 `HttpExecutor` 把 `Request` 序列化打到 `api/query.py`,后者调**同一个** `ReadService.query`——即上图从 ReadService 起完全一致。
 
 ## 3. 一次写(`insert`)怎么流
 
 ```
 Seekbase.insert(table, rows)                          # client.py → Request(op=insert)
-  → LocalExecutor.execute → WriteService.insert       # service/write.py:薄编排(~5 行,只管顺序+原子)
+  → LocalExecutor.execute → WriteService.insert       # service/write_service.py:薄编排(~5 行,只管顺序+原子)
         StoreService.validate(...)                    #   store 拥有:列校验 + dup-pk(PK 约束兜底)
         SearchService.embed_records(...)              #   search 拥有:内联 embed + jieba 分词
         FileService.write_puts(...)                   #   file 拥有落盘形状;文件最先(canonical)
         StoreService.commit_rows(...)                 #   随行 INSERT(含 _vec/_tok)+ FTS 重建(一个 bridge 块)
-        TicketRegistry.issue("insert")                #   → struct.Ticket
+        TicketService.issue("insert")                #   → struct.Ticket
   → Ticket                                            # client.insert 取 .id;api 出口 .to_wire()
 ```
 
@@ -59,7 +59,7 @@ Seekbase.insert(table, rows)                          # client.py → Request(op
 
 ## 4. 关键接缝
 
-- **两形态接缝 = `Request` + executor**:`client` 只构造 `Request`,不认识本地/远程;`LocalExecutor`(`service/dispatch.py`)→service,`HttpExecutor`(`api/remote.py`)→HTTP。`Ticket` 在 HTTP 边界 `to_wire`/`from_wire`,所以 client 本地/远程拿到的都是 `Ticket`,传输无关。
+- **两形态接缝 = `Request` + executor**:`client` 只构造 `Request`,不认识本地/远程;`LocalExecutor`(`client.py` 的 LocalExecutor)→service,`HttpExecutor`(`api/remote.py`)→HTTP。`Ticket` 在 HTTP 边界 `to_wire`/`from_wire`,所以 client 本地/远程拿到的都是 `Ticket`,传输无关。
 - **单写者 bridge**(`runtime/bridge.py`):一个单线程持有唯一 DuckDB 连接,所有 DuckDB 操作串行化。用例服务决定粗粒度顺序(files 先于 db),领域服务内部保原子(`StoreService.commit_rows` = INSERT + FTS 一个块)。
 - **canonical 是文件**:`StoreService` 的 DuckDB 是从文件可重建的派生层;`AdminService.rebuild` 重放镜像重灌(见 [store.md](store.md))。
 

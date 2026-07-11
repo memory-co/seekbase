@@ -10,7 +10,7 @@ from ._route import Endpoint
 
 
 async def handle(db, body: dict, params: dict) -> tuple[int, dict]:
-    return 200, await db.services.query.query(
+    return 200, await db.services.read.query(
         body.get("sql"), body.get("params") or [], body.get("ds_start"), body.get("ds_end"))
 
 
