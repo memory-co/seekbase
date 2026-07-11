@@ -10,7 +10,7 @@ serialized to an HTTP endpoint (HttpExecutor). One shape both forms agree on:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -27,4 +27,3 @@ class Request:
     where: str | None = None          # delete
     # poll / admin
     ticket: str | None = None         # status
-    _extra: dict = field(default_factory=dict)

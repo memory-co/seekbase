@@ -6,8 +6,6 @@ to run against the visibility view. Mirrors ``api/query.py`` / docs/api/query.md
 """
 from __future__ import annotations
 
-from typing import Any
-
 from .._engine.rewrite import extract_searches, search_target
 from .._types import QueryError
 
