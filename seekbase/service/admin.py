@@ -6,16 +6,15 @@ re-apply the soft-deletes, and refresh each table's FTS index once.
 """
 from __future__ import annotations
 
-from .._engine.clock import now
+from ..runtime import now
 from ..struct import CREATED_AT, DELETED_AT, DS
 
 
 class AdminService:
-    def __init__(self, duck, search, files, bridge, schema, tickets) -> None:
-        self._duck = duck
+    def __init__(self, store, search, files, schema, tickets) -> None:
+        self._store = store
         self._search = search
         self._files = files
-        self._bridge = bridge
         self._schema = schema
         self._tickets = tickets
 
@@ -43,19 +42,19 @@ class AdminService:
 
         # 2) clear, reload rows, re-apply deletes, refresh FTS once per table
         for spec in self._schema.tables:
-            await self._duck.clear(spec.name)
+            await self._store.clear(spec.name)
         for spec in self._schema.tables:
             result["tables"] += 1
             r = replay[spec.name]
             for i, rec in enumerate(r["recs"]):
-                await self._duck.commit_rows(
+                await self._store.commit_rows(
                     spec, [rec],
                     {c: [r["vecs"][c][i]] for c in r["vecs"]},
                     {c: [r["toks"][c][i]] for c in r["toks"]},
                     r["ds"][i], r["ca"][i] or now(), rebuild_fts=False)
                 result["rows"] += 1
             for pk_val, dds, dat in r["dels"]:
-                await self._duck.soft_delete(spec.name, [pk_val], dds, dat)
+                await self._store.soft_delete(spec.name, [pk_val], dds, dat)
                 result["tombstones"] += 1
-            await self._duck.rebuild_fts(spec.name)
+            await self._store.rebuild_fts(spec.name)
         return self._tickets.issue("rebuild", stats=result)

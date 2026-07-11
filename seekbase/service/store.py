@@ -1,14 +1,16 @@
-"""DuckdbEngine — the DuckDB mechanism layer (no orchestration).
+"""StoreService — the structured-storage subdomain (DuckDB).
 
-One physical table per business table, ``_sb_<table>``: business columns +
-metadata (ds / created_at / deleted_ds / deleted_at) +, per searchable column,
-``_vec_<col>`` (HNSW) and ``_tok_<col>`` (BM25). The primary key is write-once.
+Owns the DuckDB side: one physical table per business table, ``_sb_<table>``,
+with business columns + metadata (ds / created_at / deleted_ds / deleted_at) +,
+per searchable column, ``_vec_<col>`` (HNSW) and ``_tok_<col>`` (BM25). The
+primary key is write-once. It owns structured validation (unknown columns,
+dup-pk), the row primitives (``commit_rows`` / ``match_live`` / ``soft_delete``
+/ ``clear``) and read (``run_query`` — read-only guard + visibility view +
+search-score joins). It shares its DuckDB connection with SearchService (single
+engine): ``commit_rows`` refreshes the touched FTS index in the same block.
 
-This class only speaks DuckDB: DDL, row primitives (``existing_keys`` /
-``commit_rows`` / ``match_live`` / ``soft_delete`` / ``clear``) and read
-(``run_query`` — read-only guard + the visibility view + search-score joins).
-The *use cases* that string these together with the file mirror and the
-embedder live in ``seekbase/service/`` (query / write / admin).
+The use-case services (write / query / admin) sequence StoreService with
+FileService and SearchService.
 """
 from __future__ import annotations
 
@@ -20,11 +22,11 @@ from typing import Any
 import duckdb
 
 from .._types import QueryError, ReadOnlyError
+from ..runtime import Bridge
 from ..struct import CREATED_AT, DELETED_AT, DELETED_DS, DS, Schema, TableSpec
-from .bridge import Bridge
-from .search import SearchEngine, tokcol, veccol
+from .search import SearchService, tokcol, veccol
 
-__all__ = ["DuckdbEngine"]
+__all__ = ["StoreService"]
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DS_RE = re.compile(r"^\d{8}$")
@@ -52,18 +54,18 @@ def _one_statement(sql: str, label: str) -> str:
     return s
 
 
-class DuckdbEngine:
+class StoreService:
     def __init__(self, bridge: Bridge, conn, schema: Schema, dim: int | None) -> None:
         self._bridge = bridge
         self._conn = conn
         self._schema = schema
         self._dim = dim               # embedding dim, or None if nothing searchable
-        self._search: SearchEngine | None = None
+        self._search: SearchService | None = None
 
     @classmethod
     async def open(
         cls, data_dir: Path, schema: Schema, bridge: Bridge, embedder=None
-    ) -> "DuckdbEngine":
+    ) -> "StoreService":
         data_dir = Path(data_dir)
         conn = await bridge.run(lambda: duckdb.connect(str(data_dir / "duck.db")))
         has_searchable = any(s.searchable for s in schema.tables)
@@ -71,11 +73,11 @@ class DuckdbEngine:
         engine = cls(bridge, conn, schema, dim)
         await bridge.run(engine._create_tables)
         if dim is not None:
-            engine._search = await SearchEngine.create(bridge, conn, schema, embedder)
+            engine._search = await SearchService.create(bridge, conn, schema, embedder)
         return engine
 
     @property
-    def search(self) -> SearchEngine | None:
+    def search(self) -> SearchService | None:
         return self._search
 
     @property
@@ -182,7 +184,29 @@ class DuckdbEngine:
 
     # ─── write primitives (orchestrated by service/write + service/admin) ─
 
-    async def existing_keys(self, table: str, keys: list[str]) -> list[str]:
+    async def validate(self, table: str, rows: list[dict]) -> list[dict]:
+        """Validate rows for insert — unknown columns + write-once primary key
+        (intra-batch and against existing rows) — and return the normalized
+        records (business columns only). The PRIMARY KEY constraint backstops
+        the dup check if two inserts race past it."""
+        spec = self._schema.table(table)
+        records: list[dict] = []
+        for row in rows:
+            unknown = set(row) - set(spec.column_names)
+            if unknown:
+                raise QueryError(f"{table}: unknown column(s) {sorted(unknown)}")
+            records.append({c: row.get(c) for c in spec.column_names})
+        keys = [str(r[spec.primary_key]) for r in records]
+        if len(set(keys)) != len(keys):
+            raise QueryError(f"{table}: duplicate primary key within the insert batch")
+        existing = await self._existing_keys(table, keys)
+        if existing:
+            raise QueryError(
+                f"{table}: primary key already exists: {existing[0]!r} "
+                f"(seekbase is insert-only; a key is written once)")
+        return records
+
+    async def _existing_keys(self, table: str, keys: list[str]) -> list[str]:
         if not keys:
             return []
         pk = self._schema.table(table).primary_key

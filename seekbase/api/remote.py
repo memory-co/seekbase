@@ -1,52 +1,18 @@
-"""Executors — the seam between the two forms.
+"""HttpExecutor — the client half of the HTTP API.
 
-``LocalExecutor`` is a thin forwarder: it maps a ``Request``'s op to the matching
-service method and returns whatever the service returns (the full response —
-rows / ticket dict). It exists so the embedded port can stay transport-agnostic
-(``open`` gets a LocalExecutor, ``connect`` gets an HttpExecutor). The HTTP
-``api/`` handlers call the same services directly — no op indirection there.
-
-``HttpExecutor`` sends the same ``Request`` to the matching HTTP endpoint.
+The remote counterpart to ``api/*.py`` (the server endpoints): it sends a
+``Request`` to the matching endpoint on a running seekbase server and returns
+the same types the local path does (``{"rows": …}`` for query, a ``Ticket`` for
+writes/status — reconstructed from the JSON), so the client stays
+transport-agnostic. Used by ``Seekbase.connect``.
 """
 from __future__ import annotations
 
 from typing import Any
 
 from .._types import QueryError
+from .._wire import exception_from
 from ..struct import Ticket
-from .bridge import Bridge
-
-
-class LocalExecutor:
-    def __init__(self, bridge: Bridge, services, duck) -> None:
-        self._bridge = bridge
-        self._svc = services
-        self._duck = duck                    # held for lifecycle (close) only
-
-    async def start(self) -> None:
-        return None                          # nothing async to spin up (writes are synchronous)
-
-    @property
-    def ready(self) -> bool:
-        return True
-
-    async def execute(self, req) -> Any:
-        op = req.op
-        if op == "query":
-            return await self._svc.query.query(req.sql, req.params, req.ds_start, req.ds_end)
-        if op == "insert":
-            return await self._svc.write.insert(req.table, list(req.rows))
-        if op == "delete":
-            return await self._svc.write.delete(req.table, req.where, list(req.params))
-        if op == "status":
-            return self._svc.tickets.status(req.ticket)
-        if op == "rebuild":
-            return await self._svc.admin.rebuild()
-        raise QueryError(f"unknown op {op!r}")
-
-    async def close(self) -> None:
-        await self._duck.close()             # closes the single connection (vss+fts included)
-        self._bridge.close()
 
 
 class HttpExecutor:
@@ -67,8 +33,6 @@ class HttpExecutor:
         return True
 
     async def execute(self, req) -> Any:
-        # ticket ops return a Ticket (reconstructed from the JSON), so the port
-        # sees the same type as it does locally; query returns {"rows": …}.
         op = req.op
         if op == "query":
             return await self._post("/v1/query", {
@@ -93,7 +57,6 @@ class HttpExecutor:
         return self._unwrap(await self._client.get(path))
 
     def _unwrap(self, resp) -> Any:
-        from .._wire import exception_from
         data = resp.json()
         if resp.status_code >= 400:
             raise exception_from(data.get("error", {}))

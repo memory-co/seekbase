@@ -1,24 +1,33 @@
-"""Service layer — use-case orchestration (business-agnostic CRUD + search).
+"""Service layer — domain services + use-case services (business-agnostic).
 
-One class per use-case group. Both entry points call these services directly —
-the HTTP ``api/`` handlers, and the embedded port (via the thin LocalExecutor).
-Each service owns its full response shape (rows / ticket), so callers just relay
-it. Services sit above the ``_engine`` mechanisms (duck / search / files):
+Everything is a service here; ``_engine`` is gone. Two kinds:
 
-  query.py    QueryService  — read: search rewrite → hybrid → engine query
-  write.py    WriteService  — insert / delete: validate → files → DuckDB
-  admin.py    AdminService  — rebuild: replay the file mirror into DuckDB
-  tickets.py  TicketRegistry — write tickets (issue on write, look up on status)
+  domain services (own a subdomain end-to-end)
+    store.py    StoreService   — DuckDB structured: DDL, validate, commit, query
+    search.py   SearchService  — vss + fts: embed, tokenize, index, hybrid
+    files.py    FileService    — canonical file mirror: record/tombstone shapes
 
-``build_services`` wires them from the engines; ``Services`` bundles them so a
-caller takes a single dependency.
+  use-case services (thin orchestrators: order + policy only)
+    query.py    QueryService   — read: rewrite → hybrid → store query
+    write.py    WriteService   — insert / delete: validate → files → store
+    admin.py    AdminService   — rebuild: replay the file mirror into the store
+    tickets.py  TicketRegistry — write tickets (issue on write, look up on status)
+    dispatch.py LocalExecutor  — map a Request's op to a service (the local seam)
+
+``build_services`` wires the use-case services onto the domain ones; ``Services``
+bundles them. Both entry points (HTTP ``api/`` handlers, embedded client via
+LocalExecutor) call the same services.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from .admin import AdminService
+from .dispatch import LocalExecutor
+from .files import FileService
 from .query import QueryService
+from .search import SearchService
+from .store import StoreService
 from .tickets import TicketRegistry
 from .write import WriteService
 
@@ -31,17 +40,19 @@ class Services:
     tickets: TicketRegistry
 
 
-def build_services(duck, search, files, bridge, schema) -> Services:
+def build_services(store, search, files, schema) -> Services:
     tickets = TicketRegistry()
     return Services(
-        query=QueryService(duck, search, schema),
-        write=WriteService(duck, search, files, bridge, schema, tickets),
-        admin=AdminService(duck, search, files, bridge, schema, tickets),
+        query=QueryService(store, search, schema),
+        write=WriteService(store, search, files, schema, tickets),
+        admin=AdminService(store, search, files, schema, tickets),
         tickets=tickets,
     )
 
 
 __all__ = [
-    "Services", "QueryService", "WriteService", "AdminService",
-    "TicketRegistry", "build_services",
+    "Services", "build_services",
+    "StoreService", "SearchService", "FileService",
+    "QueryService", "WriteService", "AdminService",
+    "TicketRegistry", "LocalExecutor",
 ]

@@ -61,9 +61,9 @@ async def test_time_travel_across_create_and_delete(tmp_path):
 
     n1: created@day02 → deleted@day05.
     """
-    from seekbase._engine.bridge import Bridge
-    from seekbase._engine.duck import DuckdbEngine
+    from seekbase.runtime import Bridge
     from seekbase.schema import parse_schema
+    from seekbase.service.store import StoreService
 
     bridge = Bridge()
     schema = parse_schema([{
@@ -71,7 +71,7 @@ async def test_time_travel_across_create_and_delete(tmp_path):
         "columns": [{"name": "id", "type": "str"}, {"name": "text", "type": "str"}],
         "primary": "id",
     }])
-    eng = await DuckdbEngine.open(tmp_path, schema, bridge)
+    eng = await StoreService.open(tmp_path, schema, bridge)
 
     def _seed():
         c = eng._conn

@@ -1,26 +1,41 @@
-"""SearchEngine — vss + fts **on the business tables** (single-table model).
+"""SearchService — the vss + fts subdomain (semantic + full-text search).
 
-No separate vector store, no derived projection: each business table
-``_sb_<table>`` carries, per searchable column, a ``_vec_<col> FLOAT[dim]``
-(indexed by a vss/HNSW cosine index) and a ``_tok_<col>`` (jieba tokens; one
-BM25/fts index covers all tok columns, per-column matching via
-``match_bm25(…, fields := '_tok_<col>')``).
+Owns everything about search on the business tables: index setup, embedding,
+Chinese tokenization (jieba), and hybrid retrieval. Each ``_sb_<table>`` carries,
+per searchable column, a ``_vec_<col> FLOAT[dim]`` (vss/HNSW cosine) and a
+``_tok_<col>`` (jieba tokens; one BM25/fts index over all tok columns,
+per-column matching via ``match_bm25(…, fields := '_tok_<col>')``).
 
 Vectors are written **inline at INSERT** and never updated: primary keys are
-write-once (re-insert is rejected), so a row's vector is set once and only ever
-soft-deleted. This sidesteps the DuckDB crash where UPDATE-ing a NULL→vector on
-an experimental on-disk HNSW index segfaults.
-
-``search(col, 'text')`` fuses vss (cosine ANN) + fts (BM25) by RRF (k0=60).
+write-once, so a row's vector is set once and only ever soft-deleted — sidestepping
+the DuckDB crash where UPDATE-ing a NULL→vector on an experimental on-disk HNSW
+index segfaults. ``search(col, 'text')`` fuses vss (cosine ANN) + fts (BM25) by
+RRF (k0=60). Shares the DuckDB connection with StoreService (single engine).
 """
 from __future__ import annotations
 
 import inspect
 
 from .._types import EmbedderInvalid
-from . import text
 
 _K = 100
+
+_jieba = None
+
+
+def _tokens(s: str) -> str:
+    """Space-joined jieba tokens (search mode), lowercased, blanks dropped —
+    the same segmentation on the index side (``_tok`` column) and the query
+    side, so DuckDB fts (which splits on whitespace) can match Chinese."""
+    global _jieba
+    if not s:
+        return ""
+    if _jieba is None:
+        import jieba  # lazy: importing jieba loads its dictionary (~1s)
+
+        _jieba = jieba
+    out = [t.strip().lower() for t in _jieba.lcut_for_search(str(s))]
+    return " ".join(t for t in out if t)
 
 
 def veccol(col: str) -> str:
@@ -31,7 +46,7 @@ def tokcol(col: str) -> str:
     return f"_tok_{col}"
 
 
-class SearchEngine:
+class SearchService:
     def __init__(self, bridge, conn, schema, embedder, dim: int) -> None:
         self._bridge = bridge
         self._conn = conn
@@ -45,7 +60,7 @@ class SearchEngine:
 
     # ─── setup ─────────────────────────────────────────────────────────
     @classmethod
-    async def create(cls, bridge, conn, schema, embedder) -> "SearchEngine":
+    async def create(cls, bridge, conn, schema, embedder) -> "SearchService":
         self = cls(bridge, conn, schema, embedder, int(embedder.dim))
         await bridge.run(self._setup)
         return self
@@ -92,7 +107,7 @@ class SearchEngine:
         return out
 
     def tok(self, s: str) -> str:
-        return text.tokens(s)
+        return _tokens(s)
 
     async def embed_records(self, spec, records: list[dict]) -> tuple[dict, dict]:
         """Inline embed + tokenize each searchable column across ``records``.
@@ -115,7 +130,7 @@ class SearchEngine:
     # ─── query: RRF(vss, fts) directly on the business table ───────────
     async def hybrid(self, table: str, col: str, text_: str, k: int = _K) -> list[tuple[str, float]]:
         vec = (await self.embed([text_]))[0]
-        tok = text.tokens(text_)
+        tok = _tokens(text_)
         spec = self._schema.table(table)
         phys = f"_sb_{table}"
         pk = spec.primary_key

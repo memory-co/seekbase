@@ -6,15 +6,15 @@ to run against the visibility view. Mirrors ``api/query.py`` / docs/api/query.md
 """
 from __future__ import annotations
 
-from .._engine.rewrite import extract_searches, search_target
 from .._types import QueryError
+from .rewrite import extract_searches, search_target
 
 _SEARCH_K = 100
 
 
 class QueryService:
-    def __init__(self, duck, search, schema) -> None:
-        self._duck = duck
+    def __init__(self, store, search, schema) -> None:
+        self._store = store
         self._search = search
         self._schema = schema
 
@@ -32,5 +32,5 @@ class QueryService:
                 target = search_target(self._schema, sql, col)
                 results = await self._search.hybrid(target, col, text, _SEARCH_K)
                 searches.append((target, name, results))
-        rows = await self._duck.run_query(rewritten, list(params), ds_start, ds_end, searches)
+        rows = await self._store.run_query(rewritten, list(params), ds_start, ds_end, searches)
         return {"rows": rows}

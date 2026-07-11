@@ -13,13 +13,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from ._engine.bridge import Bridge
-from ._engine.duck import DuckdbEngine
-from ._engine.executor import HttpExecutor, LocalExecutor
-from ._engine.files import FileMirror
 from ._types import Embedder, EmbedderInvalid
+from .api.remote import HttpExecutor
+from .runtime import Bridge
 from .schema import parse_schema
-from .service import build_services
+from .service import FileService, LocalExecutor, StoreService, build_services
 from .struct import Request, Row, Ticket
 
 
@@ -57,10 +55,10 @@ class Seekbase:
                 "schema declares searchable columns but no embedder was provided"
             )
         bridge = Bridge()
-        files = FileMirror(data_dir / "files")
-        duck = await DuckdbEngine.open(data_dir, parsed, bridge, embedder=embedder)
-        services = build_services(duck, duck.search, files, bridge, parsed)
-        executor = LocalExecutor(bridge, services, duck)
+        store = await StoreService.open(data_dir, parsed, bridge, embedder=embedder)
+        files = FileService(bridge, data_dir / "files")
+        services = build_services(store, store.search, files, parsed)
+        executor = LocalExecutor(services, store, bridge)
         await executor.start()
         return cls(executor, services)
 

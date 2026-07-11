@@ -1,62 +1,41 @@
 """WriteService — the write use cases (insert / delete).
 
-Orchestrates the three subsystems in order: validate → embed (search) →
-**files first** (canonical mirror) → DuckDB (row commit / soft-delete). Files
-lead so the mirror can recalibrate the derived DuckDB on ``rebuild``. Writes are
+A thin orchestrator: it owns only the cross-subdomain **order + atomicity**
+(files first, then DuckDB), and delegates each subdomain's own logic to its
+service — StoreService (validation, dup-pk, row commit), SearchService (embed +
+tokenize), FileService (the on-disk record/tombstone shapes). Writes are
 synchronous; primary keys are write-once (re-insert → error).
 """
 from __future__ import annotations
 
-from .._engine.clock import now, today
 from .._types import QueryError
-from ..struct import CREATED_AT, DELETED_AT, DS
+from ..runtime import now, today
 
 
 class WriteService:
-    def __init__(self, duck, search, files, bridge, schema, tickets) -> None:
-        self._duck = duck
+    def __init__(self, store, search, files, schema, tickets) -> None:
+        self._store = store
         self._search = search
         self._files = files
-        self._bridge = bridge
         self._schema = schema
         self._tickets = tickets
 
     async def insert(self, table: str, rows: list[dict]):
+        records = await self._store.validate(table, rows)     # cols + write-once pk
         spec = self._schema.table(table)
-        records: list[dict] = []
-        for row in rows:
-            unknown = set(row) - set(spec.column_names)
-            if unknown:
-                raise QueryError(f"{table}: unknown column(s) {sorted(unknown)}")
-            records.append({c: row.get(c) for c in spec.column_names})
-
-        pk = spec.primary_key
-        keys = [str(r[pk]) for r in records]
-        if len(set(keys)) != len(keys):
-            raise QueryError(f"{table}: duplicate primary key within the insert batch")
-        existing = await self._duck.existing_keys(table, keys)
-        if existing:
-            raise QueryError(
-                f"{table}: primary key already exists: {existing[0]!r} "
-                f"(seekbase is insert-only; a key is written once)")
-
         vecs, toks = ({}, {})
         if self._search is not None:
             vecs, toks = await self._search.embed_records(spec, records)
-
         ds, ts = today(), now()
-        mrecs = [{**{c: rec[c] for c in spec.column_names}, DS: ds, CREATED_AT: ts}
-                 for rec in records]
-        await self._bridge.run(lambda: [self._files.append(ds, table, m) for m in mrecs])
-        await self._duck.commit_rows(spec, records, vecs, toks, ds, ts)
-        return self._tickets.issue("insert")   # -> struct.Ticket
+        await self._files.write_puts(spec, records, ds, ts)   # canonical, files first
+        await self._store.commit_rows(spec, records, vecs, toks, ds, ts)  # rows + FTS (atomic)
+        return self._tickets.issue("insert")                  # -> struct.Ticket
 
     async def delete(self, table: str, where: str | None, params):
         if not where:
             raise QueryError("delete requires a where clause")
-        keys = await self._duck.match_live(table, where, list(params))
+        keys = await self._store.match_live(table, where, list(params))
         ds, ts = today(), now()
-        await self._bridge.run(
-            lambda: [self._files.append(ds, table, {"_deleted": k, DELETED_AT: ts}) for k in keys])
-        await self._duck.soft_delete(table, keys, ds, ts)
+        await self._files.write_deletes(table, keys, ds, ts)  # tombstone lines, files first
+        await self._store.soft_delete(table, keys, ds, ts)
         return self._tickets.issue("delete", matched=len(keys))
