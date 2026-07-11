@@ -106,7 +106,7 @@
 {"sql": "SELECT * FROM cards", "ds_start": "20260601"}                              // 6/1 之后至今
 ```
 
-> 上表是**创建维度**的过滤;存活判定还叠加**删除 horizon**——as-of `ds_end` 会把「删于 `ds_end` 之后」的行仍算作可见。派生表是 append-only 事件日志,查询按**事件重放**现算「as-of 的最新存活版本」,对多版本(建→删→重插)也完备——精确语义与证明见 [`../works/time_machine.md`](../works/time_machine.md)。
+> 上表是**创建维度**的过滤;存活判定还叠加**删除 horizon**——as-of `ds_end` 会把「删于 `ds_end` 之后」的行仍算作可见。每主键在表里恰好一行(**写一次**),as-of 就是一句谓词 `ds <= ds_end AND (deleted_ds IS NULL OR deleted_ds > ds_end)`——精确语义见 [`../works/time_machine.md`](../works/time_machine.md)。
 
 - 这是**分区裁剪**,扫描量随时间窗收敛;`search()` 一并按 `ds` 裁剪。
 - 等价于在 SQL 里写 `WHERE ds >= … AND ds <= …`;`ds_start`/`ds_end` 是把它提成请求参数(server 直接用来选分区)。也可在 `sql` 里自己用 `ds` 列(`WHERE ds = '20260605'` 看某天)。
@@ -118,5 +118,5 @@
 ## 现状
 
 - 普通结构化 SQL 查询:✅ 可用。
-- `search()`(DuckDB `vss`+`fts` hybrid + RRF `_score`,与结构化过滤 / 时间窗组合):**✅ 可用(M3/M5)**。向量 + 全文由后台 consumer 从 outbox 异步兑现(HNSW 增量、FTS 批末重建),`wait(ticket)` 排干后可搜到。
+- `search()`(DuckDB `vss`+`fts` hybrid + RRF `_score`,与结构化过滤 / 时间窗组合):**✅ 可用**。向量 + 全文在 insert 时同步落库(向量随行、FTS 同步重建),写完即可搜。
 - `ds_start` / `ds_end` 时间窗按 `ds` 列裁剪:✅ 可用(可见性视图);顶层文件物理分区目录 M2 已落。

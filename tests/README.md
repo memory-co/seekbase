@@ -9,7 +9,7 @@
 | 目录 | 测什么 |
 |---|---|
 | [`quickstart/`](quickstart/) | 最基础的本地用法(端到端):开库 → 写 → 查 → 删 → 再查,不起 server、不需 embedder;含关库重开数据仍在 |
-| [`read_write/`](read_write/) | SQL `query` 读 + 异步 `insert`/`delete`(ticket)round-trip:批量、参数化、`count`、重复主键 latest-wins |
+| [`read_write/`](read_write/) | SQL `query` 读 + 同步 `insert`/`delete`(ticket)round-trip:批量、参数化、`count`、重复主键报错 |
 | [`file_mirror/`](file_mirror/) | canonical 文件镜像:写落 `ds=…/<表>.jsonl`、删是 append 墓碑、`rebuild` 从文件重灌恢复精确状态 |
 | [`search/`](search/) | SQL 里的 `search()`:按相似度排序 + `_score`、和结构化过滤/时间窗组合、删后搜不到、无 searchable 表报错 |
 | [`insert_only/`](insert_only/) | `delete()` 只打墓碑:正常查询看不到、重删匹配 0;端口无 update/upsert |

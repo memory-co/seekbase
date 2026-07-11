@@ -11,7 +11,7 @@
 
 两种形态的**调用代码逐字节相同**——`query(sql)` / `insert` / `delete` 一个字都不用改,变的只有你怎么拿到 `db` 句柄。
 
-> **状态:M1–M5 已落(核心完整,含单引擎切换)。** SQL `query`(结构化 + hybrid `search()` + `ds` 时间窗)、异步 ticket 写(`insert`/`delete`)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、检索侧(**DuckDB `vss`+`fts`,单引擎、无 LanceDB** + outbox consumer)、两种使用形态,今天都能跑。**delete 只打 `deleted_ds` 墓碑、历史永久保留,没有物理删/vacuum**。完整设计见 [DESIGN.md](DESIGN.md)。
+> **状态:核心完整(单引擎 + 单表同步写)。** SQL `query`(结构化 + hybrid `search()` + `ds` 时间窗)、同步 ticket 写(`insert`/`delete`,**主键写一次、重复报错**)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、检索侧(**DuckDB `vss`+`fts` 就地长在业务表上,单引擎、无 LanceDB**)、两种使用形态,今天都能跑。**delete 只软删 `deleted_ds` 墓碑、历史永久保留,没有物理删/vacuum**。完整设计见 [DESIGN.md](DESIGN.md)。
 
 ## 安装
 
@@ -41,7 +41,7 @@ SCHEMA = [
 
 db = await Seekbase.open("./data", schema=SCHEMA)
 
-# 写是异步的:返回 ticket,可 wait 到落库
+# 写是同步的:返回 ticket(已落库),wait 立即返回
 await db.wait(await db.insert("cards", {"card_id": "c1", "issue": "pty vs tmux", "kind": "issue"}))
 
 # 读是 SQL:结构化 + 时光机(ds_start/ds_end)+ 语义 search() 都在这一个接口
@@ -82,7 +82,7 @@ rows = await db.query("SELECT card_id, issue FROM cards WHERE kind = ?", params=
 await db.close()
 ```
 
-读走 `POST /v1/query`、写走 `POST /v1/insert`(异步 ticket)。**错误过线保型**(server 侧抛的 `ReadOnlyError`,client 侧还是 `ReadOnlyError`)。鉴权是一个可选的 bearer token;时光机走 `query(..., ds_end="20260601")`,HTTP 上一样。
+读走 `POST /v1/query`、写走 `POST /v1/insert`(同步,返回已 done 的 ticket)。**错误过线保型**(server 侧抛的 `ReadOnlyError`,client 侧还是 `ReadOnlyError`)。鉴权是一个可选的 bearer token;时光机走 `query(..., ds_end="20260601")`,HTTP 上一样。
 
 ## 设计原则
 

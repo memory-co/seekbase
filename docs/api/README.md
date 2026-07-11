@@ -1,6 +1,6 @@
 # API 参考
 
-seekbase 的本地 API,所有接口收发 JSON。**读同步、写异步**:
+seekbase 的本地 API,所有接口收发 JSON。**读写都同步**:
 
 - **读**:`POST /v1/query` 传一段 SQL(语义检索 `search()` 与时间窗 `ds_start`/`ds_end` 都在这一个接口里),同步返回行。
 - **写**:提交类接口(insert / delete / rebuild)**不阻塞**——返回一个 `ticket`,再用 `GET /v1/writes/{ticket}` 轮询这次写入的状态。
@@ -9,10 +9,10 @@ seekbase 的本地 API,所有接口收发 JSON。**读同步、写异步**:
 
 ```
 Query     POST  /v1/query              读:SQL(含 search + ds 时间窗),返回行         → query.md
-Insert    POST  /v1/insert             写(异步):提交要写的行,返 ticket             → insert.md
-Delete    POST  /v1/delete             写(异步):按条件打墓碑,返 ticket             → delete.md
-Writes    GET   /v1/writes/{ticket}    查一次写入的状态(pending/done/failed)         → insert.md
-Rebuild   POST  /v1/rebuild            从文件重建派生层(异步),返 ticket             → admin.md
+Insert    POST  /v1/insert             写(同步):提交要写的行,返 ticket(已 done)  → insert.md
+Delete    POST  /v1/delete             写(同步):按条件软删墓碑,返 ticket(已 done) → delete.md
+Writes    GET   /v1/writes/{ticket}    查一次写入的状态(done/failed)                 → insert.md
+Rebuild   POST  /v1/rebuild            从文件重建派生层(同步),返 ticket(已 done)  → admin.md
 Health    GET   /v1/health             健康:{"ready": bool}                          → admin.md
 ```
 
@@ -38,7 +38,7 @@ server 配了 `api_key` 时每个请求须带 `Authorization: Bearer <api_key>`;
 
 ## 设计要点
 
-- **读同步、写异步**。`query` 同步返回;写(insert/delete/rebuild)返回 `ticket`,真正兑现是异步的。**提交后要等 ticket 到 `done`,这次写入才保证被 `query`/`search` 读到**(读己之写)。
+- **读写都同步**。`query` 同步返回;写(insert/delete/rebuild)也同步落库——向量在 insert 时就地 embed、随行写入,`ticket` 返回即 `done`,**写完立刻可被 `query`/`search` 读到**。API 保留 ticket 只为两形态对称。
 - **只增、引擎强制**:没有 update/upsert;`delete` 唯一语义是打 `deleted_ds` 墓碑(非物理删),`query` 默认自动滤掉墓碑行。**没有物理删 / vacuum,历史永久保留**。
 - **一个读接口,SQL 为面**:结构化查询、语义检索(`search()` 函数)、时间窗(`ds_start`/`ds_end`)全在 `POST /v1/query` 里,不为搜索单开接口。
 - **时间窗 per-request**:`ds_start`/`ds_end` 是 `query` 的参数(只给 `ds_end` = 时光机);一个 server 能同时服务各自时间窗的多个请求。
@@ -49,7 +49,7 @@ server 配了 `api_key` 时每个请求须带 `Authorization: Bearer <api_key>`;
 | 文档 | 覆盖 |
 |---|---|
 | [query.md](query.md) | 读:SQL + `search()` + 时间窗 `ds_start`/`ds_end` |
-| [insert.md](insert.md) | 异步写:提交 + 状态查询 |
-| [delete.md](delete.md) | 异步删:打墓碑 |
+| [insert.md](insert.md) | 同步写:提交 + 状态查询 |
+| [delete.md](delete.md) | 同步删:软删墓碑 |
 | [admin.md](admin.md) | `rebuild` / `health` |
 | [setup.md](setup.md) | `open` / `connect` / `serve` + schema 声明 + embedder 注入 |

@@ -41,7 +41,7 @@ db = await Seekbase.connect(
 
 ```python
 db.ready            # bool(对应 GET /v1/health 的 ready)
-await db.close()    # 嵌入:关 DuckDB(含 vss/fts)+ 停 consumer;客户端:关 httpx
+await db.close()    # 嵌入:关 DuckDB(含 vss/fts);客户端:关 httpx
 async with await Seekbase.open(data_dir, schema=SCHEMA) as db:
     ...             # 退出自动 close()
 ```
@@ -97,7 +97,7 @@ SCHEMA = [
 - **声明式、不从首行推断**(避免首行 null 把列判成 string)。
 - `ds` / `created_at` / `deleted_ds` / `deleted_at` 是**引擎代管的元数据列**,自动加、**不许自己声明**:`ds`/`deleted_ds`(天,`YYYYMMDD`,分区 / 时光机判定)+ `created_at`/`deleted_at`(精确时刻)。见 [`../works/time_machine.md`](../works/time_machine.md)。
 
-**`primary`** —— 表级单独字段,主键列名。每表有且仅有一个;须是 `str` / `int` 列;是各层(事件表 / vss+fts 派生表 / 文件)对齐的锚。
+**`primary`** —— 表级单独字段,主键列名。每表有且仅有一个;须是 `str` / `int` 列;**写一次**(重复主键报错);是各层(DuckDB 物理表 / 文件)对齐的锚。
 
 **`searchable`**(可选)—— 哪些列可被 `search()` 检索(hybrid:vss 向量 + fts 全文),**必须是 `str` 列**。声明了 ⇒ **必须注入 embedder**(否则 `EmbedderInvalid`);没有则是纯结构化表、零检索开销。`vss`/`fts` 是 DuckDB 扩展,`open()` 时自动 `INSTALL/LOAD`(首次需联网),中文分词用内置 `jieba`。
 

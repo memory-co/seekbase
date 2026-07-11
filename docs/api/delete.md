@@ -1,6 +1,6 @@
 # Delete API
 
-删数据。**异步**,同 [insert](insert.md) 的提交 + 轮询模式:提交删除条件,返回 `ticket`,用 [`GET /v1/writes/{ticket}`](insert.md#get-v1writesticket--查状态) 查状态。
+删数据。**同步**,同 [insert](insert.md):提交删除条件,软删匹配的行,返回 `ticket`(已 `done`)。删除是**软删**——只标 `deleted_ds`,行永久留着。
 
 **打墓碑,非物理删**:`delete` 唯一语义是给匹配的存活行写 `deleted_at`。行物理还在(时光机 / raw SQL 仍能看到「它曾存在」),`query` 默认自动滤掉。**没有物理删**——墓碑永久保留(历史即资产)。
 
@@ -36,7 +36,7 @@ await db.wait(ticket)
 ### 响应
 
 ```json
-{"ticket": "wr_01jzp3nq", "state": "pending"}
+{"ticket": "wr_01jzp3nq", "state": "done"}
 ```
 
 `202 Accepted`。状态查询见 [insert.md](insert.md#get-v1writesticket--查状态);`done` 后 `matched` 给出打了墓碑的行数:
@@ -47,7 +47,7 @@ await db.wait(ticket)
 
 ### 副作用
 
-- 记一条带 `ds`(删除日)的**墓碑事件**——canonical 文件在**删除日分区追加**一条 `{"_deleted": pk, …}`,派生 DuckDB **INSERT 一条 del 事件**(纯 append,**不回改任何已写的行**)。见 [`../works/store.md` §5](../works/store.md)。时光机据事件重放,`ds_end` 早于删除日仍见该行(那时最新事件还是 put)。
+- 记一条带 `ds`(删除日)的**墓碑**——canonical 文件在**删除日分区追加**一条 `{"_deleted": pk, …}`;派生 DuckDB 对那一行 **`UPDATE deleted_ds/deleted_at`**(软删,只动非索引列、行仍在)。见 [`../works/store.md` §5](../works/store.md)。时光机靠 `ds` 谓词,`ds_end` 早于删除日仍见该行(`deleted_ds > ds_end`)。
 - 已经是墓碑的行不再重复打。
 
 ### 错误

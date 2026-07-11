@@ -18,7 +18,7 @@
 
 ## 不在这测什么
 
-- 时间窗 / 事件重放语义走 [`time_machine/`](../time_machine/);读写 round-trip 走 [`read_write/`](../read_write/)。
+- 时间窗 / 时光机 `ds` 语义走 [`time_machine/`](../time_machine/);读写 round-trip 走 [`read_write/`](../read_write/)。
 - **只读的信息泄露面**(纯 `SELECT` 能 `read_json('/etc/…')` 读文件系统、`PRAGMA database_list` 读元数据)—— 那是 **server 沙箱**议题,不属于「写保护」;本场景只保证**写不进去**。DuckDB 把这类只读 PRAGMA 判成 `SELECT`,故放行。
 
 ## fixture 来源

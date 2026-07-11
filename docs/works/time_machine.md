@@ -1,6 +1,6 @@
-# time_machine — 用 `ds` 日期分区实现时光机(完备设计)
+# time_machine — 用 `ds` 日期分区实现时光机
 
-> 状态:**M4 已落**(可见性视图 + `ds_start`/`ds_end` 裁剪)。本文把「时光机」用 `ds` 分区讲完备:需要**两对**日期字段(创建 / 删除),给出可见性判定、`ds_start`/`ds_end` 的完整语义、完备性真值表、两层存储落地、以及「无物理删」的取舍。存储与文件布局见 [store.md](store.md)。
+> 状态:**已落**(可见性谓词 + `ds_start`/`ds_end` 裁剪)。本文把「时光机」用 `ds` 分区讲清:需要**两对**日期字段(创建 / 删除),给出可见性判定、`ds_start`/`ds_end` 的完整语义、真值表、单表落地、以及「无物理删」的取舍。**主键写一次**(重复报错),故一个主键恰好一行——时光机是这一行上的 `ds` 过滤,不涉及多版本重放。存储与文件布局见 [store.md](store.md)。
 
 ## 1. 目标
 
@@ -17,7 +17,7 @@
 | as-of `day4` | **可见**(那时还没删) |
 | as-of `day6` | **不可见**(已删) |
 
-只知道创建分区 `ds=3`,判断不了「`day4` 时它是否已删」——删除发生在另一个时间点上。**删除必须也有自己的日期** `deleted_ds`。有了它,as-of 判定塌缩成一句可下推的谓词(§4)。这就是本次要补的字段。
+只知道创建分区 `ds=3`,判断不了「`day4` 时它是否已删」——删除发生在另一个时间点上。**删除必须也有自己的日期** `deleted_ds`。有了它,as-of 判定塌缩成一句可下推的谓词(§4)。
 
 ## 3. 四个引擎代管字段(创建 / 删除各一对:天 + 精确时刻)
 
@@ -30,71 +30,74 @@
 
 声明式 schema **不写**它们,引擎自动加(见 [api/setup.md](../api/setup.md))。对称:创建有 `(ds, created_at)`,删除有 `(deleted_ds, deleted_at)`——`_ds` 用于分区/时光机判定,`_at` 用于日内精度与审计。
 
-## 4. 可见性判定(事件重放,现算最新存活版本)
+## 4. 可见性判定(单行 + 一句谓词)
 
-派生 DuckDB 是**纯 append 事件表**(每次写 = 一条 **put** 或 **del** 事件,带单调 `_seq`;**不 update、不 replace**)。「as-of `D`」= 对每个主键**重放 ≤ D 的事件、取最新那条**:
+每个主键在 `_sb_<表>` 里**恰好一行**(主键写一次、不覆盖)。insert 落一行(`ds`/`created_at` 填、`deleted_ds`/`deleted_at` NULL);delete 对那一行 **`UPDATE deleted_ds/deleted_at`**(软删标记,行不删)。所以「as-of `D`」不需要重放事件,就是**这一行上的一句谓词**:
 
-- 收集该 pk **day ≤ D** 的所有事件(put 用 `ds`、del 用 `deleted_ds`);
-- 按 `_seq` 取**最新**一条:是 **put** → 该行存活,数据 = 那一版;是 **del** → 隐藏。
+```sql
+ds <= 'D' AND (deleted_ds IS NULL OR deleted_ds > 'D')
+```
 
-SQL 上就是一个窗口视图:`row_number() OVER (PARTITION BY pk ORDER BY _seq DESC)`,取 `rn = 1` 且该事件是 put(`ds IS NOT NULL`)。当前态(不倒带)= 不加 day 上界。`search()` 复用这个视图(hybrid 检索结果按 pk join 进来)。
+- 左半:**D 或之前创建**;右半:**没删,或删于 D 之后**。
+- **当前态**(不倒带)= `deleted_ds IS NULL`(还活着的行)。
+- `search()` 的向量/全文候选也带这条谓词(候选按主键 join 回来时一并裁掉当时不可见的行)。
 
-> **为什么不是「一行 + `deleted_ds` 谓词」**:那种「单行就地改 `deleted_ds`」的写法只对「建一次、删一次」的行成立;一旦**删了又重插**(seekbase 的「改」= 追加新版本),单行谓词就丢了旧版本、as-of 到重插之前会出错。**事件重放对任意 create/delete/re-insert 历史都对**(§6),代价是查询多一层窗口。
+因为主键写一次、没有值版本,时光机穿越的是**创建 / 删除两个时点**——行在它的 `ds` 出现、在它的 `deleted_ds` 消失。**不穿越「同一 key 改过的旧值」**(改值不被支持:重复主键直接报错),所以不需要多版本、不需要窗口重放,一句谓词就完备。
 
 ## 5. `ds_start` / `ds_end` 的完整语义
 
-`ds_end` 是 **as-of horizon**(事件重放的截止:只看 `day ≤ ds_end` 的事件);`ds_start` 是额外的**创建下界**(过滤最终存活版本的 `ds ≥ ds_start`)。
+`ds_end` 是 **as-of horizon**(倒回那天:`ds <= ds_end` 且当时未删);`ds_start` 是额外的**创建下界**(`ds >= ds_start`)。
 
-| 传入 | 语义 | 重放 |
+| 传入 | 语义 | 谓词 |
 |---|---|---|
-| 都不传 | 当前态 | 全部事件,取每 pk 最新为 put 的 |
-| 只 `ds_end` | **时光机**:as-of `ds_end` | 只放 `day ≤ ds_end` 的事件 |
-| 只 `ds_start` | `ds_start` 起、至今仍活 | 全部事件,存活版本再过滤 `ds ≥ ds_start` |
-| 都传 | `ds_start..ds_end` 创建、且在 `ds_end` 时仍活 | `day ≤ ds_end` 重放,存活版本再滤 `ds ≥ ds_start` |
+| 都不传 | 当前态 | `deleted_ds IS NULL` |
+| 只 `ds_end` | **时光机**:as-of `ds_end` | `ds <= ds_end AND (deleted_ds IS NULL OR deleted_ds > ds_end)` |
+| 只 `ds_start` | `ds_start` 起、至今仍活 | `deleted_ds IS NULL AND ds >= ds_start` |
+| 都传 | `ds_start..ds_end` 创建、且在 `ds_end` 时仍活 | as-of `ds_end` 谓词 `AND ds >= ds_start` |
 
-> **审计视图**(某窗口内**创建过**的版本,不管后来删没删)——直接在 `sql` 里 `WHERE ds BETWEEN … AND …`;`ds_start`/`ds_end` 参数默认带 as-of(存活)语义。
+> **审计视图**(某窗口内**创建过**的行,不管后来删没删)——直接在 `sql` 里 `WHERE ds BETWEEN … AND …`;`ds_start`/`ds_end` 参数默认带 as-of(存活)语义。
 
-## 6. 完备性:任意 create/delete/re-insert 历史都正确
+## 6. 单次生命周期即全部(写一次的推论)
 
-事件重放对**多版本**也成立。例:`n1` 建于 `day02`(v1)→ 删于 `day05` → 重插 `day08`(v2):
+真值表就是 §2 的两行,落到谓词:`n1` 创建于 `day02`、删除于 `day05`。
 
-| horizon `D` | `day ≤ D` 的事件 | 最新(`_seq`) | 结论 |
+| horizon `D` | `ds<=D` | 删除判定 | 结论 |
 |---|---|---|---|
-| `day03` | put@02 | put(v1) | **可见 v1** ✓ |
-| `day06` | put@02, del@05 | del | **隐藏** ✓ |
-| `day09` | put@02, del@05, put@08 | put(v2) | **可见 v2** ✓ |
-| 当前 | 全部 | put@08 | **可见 v2** ✓ |
+| `day01` | 否 | —— | **不可见**(还没建)✓ |
+| `day03` | 是 | `deleted_ds(05) > 03` | **可见** ✓ |
+| `day06` | 是 | `deleted_ds(05) ≤ 06` | **隐藏** ✓ |
+| 当前 | —— | `deleted_ds` 非空 | **隐藏** ✓ |
 
-「单行 + `deleted_ds` 谓词」在 `day03` 会漏掉 v1(派生表只剩 v2)——事件重放不会。单次生命周期是它的特例。有一个白盒测试锁住这四行(`tests/time_machine`)。
+因为主键写一次,一个 key 只有「建 → (可选)删」这一段生命周期,没有「删了又重插」的多版本——单行谓词就把它讲完。有一个白盒测试锁住这几行(`tests/time_machine`)。
 
-## 7. 落到两层存储(files / DuckDB 事件表 + 检索派生表)
+## 7. 落到单表(files / DuckDB 物理表)
 
-时间维度怎么在 [store.md](store.md) 的两层里维护(**files 与 DuckDB 事件表都是纯 append**):
+时间维度怎么在 [store.md](store.md) 的两层里维护(**files 纯 append;DuckDB 单表 insert 一行、delete 软删该行**):
 
-- **insert 事件** → 往**创建日** `files/ds=C/<表>.jsonl` append 一行快照;DuckDB `_sb_<表>` INSERT 一条 **put** 事件(business + `ds`/`created_at` + `_seq`)。
-- **delete 事件** → 往**删除日** `files/ds=X/<表>.jsonl` append 一条墓碑 `{"_deleted": "<pk>", "deleted_at": "…"}`;DuckDB INSERT 一条 **del** 事件(pk + `deleted_ds`/`deleted_at` + `_seq`,business 列 NULL、`ds` NULL)。**两边都不回改任何已写的行。**
-- **检索派生表**(vss+fts)只存**当前态**:`search()` 返回当前态候选,再 join 重放视图做 as-of 裁剪(§4;见 [search.md](search.md))。
-- **查询**只碰派生表的重放视图(§4),不扫文件;文件是审计 + `rebuild` 源。
-- `ls files/ds=D/` = **「D 那天发生的事」**。rebuild = 按 `ds` 顺序 replay 所有 `<表>.jsonl`,put→INSERT put 事件、`_deleted`→INSERT del 事件(`_seq` 按 replay 顺序,保住时序)。
+- **insert** → 往**创建日** `files/ds=C/<表>.jsonl` append 一行快照;DuckDB `_sb_<表>` **INSERT 一行**(business + `ds`/`created_at`,`deleted_ds`/`deleted_at` NULL,含 `_vec`/`_tok`)。
+- **delete** → 往**删除日** `files/ds=X/<表>.jsonl` append 一条墓碑 `{"_deleted": "<pk>", "deleted_at": "…"}`;DuckDB 对那一行 **`UPDATE deleted_ds=X, deleted_at=…`**(只动非索引元数据列,行仍在)。
+- **查询**只碰这张物理表(带上面的可见性谓词),不扫文件;文件是审计 + `rebuild` 源。
+- `ls files/ds=D/` = **「D 那天发生的事」**。rebuild = 按 `ds` 顺序 replay 所有 `<表>.jsonl`,put→INSERT 行、`_deleted`→对该行 `UPDATE deleted_ds`(顺序保住)。
 
 ## 8. 没有物理删:历史永久
 
-**seekbase 不物理删、没有 vacuum。** `delete` 永远只是打 `deleted_ds` 墓碑(派生行)+ 追加一条墓碑事件(文件);被删的行**永久留着**,时光机能倒回**任意**时刻、永远不丢历史。
+**seekbase 不物理删、没有 vacuum。** `delete` 永远只是打 `deleted_ds` 软删标记(DuckDB 行)+ 追加一条墓碑事件(文件);被删的行**永久留着**,时光机能倒回**任意**时刻、永远不丢历史。
 
-- **文件真·纯 append**:一次都不回改(连删除都不改旧文件)——「已写的行永不变」这条不变式**零例外**。
+- **文件真·纯 append**:一次都不回改(连删除都不改旧文件)——「已写的文件永不变」这条不变式**零例外**。
 - **空间单调增长**:对 memory 系统(历史即资产、churn 低、量不大)完全可接受;换来的是「历史永不丢」这条硬保证。
 - 真要「彻底抹掉某行」(如 GDPR 合规硬删)——那是一个**定点**操作,将来单独加,不是常规回收。**YAGNI**。
 
 ## 9. 边界与约定
 
-- **粒度 = 天**:同一天多个事件都落同一个 `day`;日内先后靠 `_seq`(单调,= 写入顺序)定序,as-of 到「当天结束」= 取当天最后一个事件。日内时光机(精确到某时刻)不在 v1 目标内。
-- **同日创删**(`C == X == T`):as-of `T` → 事件 put@T、del@T 都 ≤ T,最新是 del → **隐藏**(「看 `T` 结束时的世界」,当天已删)。要看「`T` 当天曾出现过」用审计视图(§5 注)。
+- **粒度 = 天**:同一天多个操作都落同一个 `day`;日内先后靠 `created_at` / `deleted_at`(精确时刻)tiebreak。as-of 到「当天结束」。日内时光机(精确到某时刻)不在 v1 目标内。
+- **同日创删**(`C == X == T`):as-of `T` → `deleted_ds(T) ≤ T` → **隐藏**(「看 `T` 结束时的世界」,当天已删)。要看「`T` 当天曾出现过」用审计视图(§5 注)。
 - **时钟**:`day` 取写入时的 **UTC 日历日**(`YYYYMMDD`);跨时区 / 单调钟细节见 DESIGN §12 待定。
-- **重复删**:已是墓碑的行再 `delete` 匹配 0(`delete` 只对当前存活的行下墓碑),不产生多余事件。
+- **重复删**:已软删的行再 `delete` 匹配 0(`delete` 只对当前存活的行下墓碑),不重复标记。
+- **重复主键**:同一主键再 insert **直接报错**(写一次),不产生新版本。
 - **未来写**:引擎按当天写入,`ds` 不接受调用方指定未来/过去日(避免污染分区语义)。
 
 ## 10. 和其他文档的关系
 
-- [store.md](store.md):两层存储与文件布局(顶层 `ds=YYYYMMDD` 分区、每表 `<表>.jsonl`、原子性);本文补「时间维度」的完备性。
+- [store.md](store.md):两层存储与文件布局(顶层 `ds=YYYYMMDD` 分区、每表 `<表>.jsonl`、原子性);本文补「时间维度」。
 - [api/query.md](../api/query.md):`ds_start`/`ds_end` 的对外接口;§5 是它的语义定义。
 - [api/setup.md](../api/setup.md):`ds` / `deleted_ds` 作为引擎代管列的声明位置。

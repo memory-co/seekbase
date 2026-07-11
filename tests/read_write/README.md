@@ -1,13 +1,13 @@
-# read_write — SQL 读 + 异步写 round-trip
+# read_write — SQL 读 + 同步写 round-trip
 
 ## 这个场景在测什么
 
-嵌入形态最普通的使用姿势 —— `insert` 写几行(异步、返 ticket)、`query` 传 SQL
+嵌入形态最普通的使用姿势 —— `insert` 写几行(同步、返 ticket)、`query` 传 SQL
 取回、`delete` 打墓碑,语义正确:
 
-1. **写是异步的**:`insert` 返 ticket,`wait(ticket)` 到 `done`;写完 `query` 读得到。
+1. **写是同步的**:`insert` 返 ticket(已 `done`);写完 `query` 立即读得到。
 2. **读是 SQL**:`query("SELECT … WHERE … ORDER BY … LIMIT …")`,聚合 / 过滤 / 排序都在 SQL 里。
-3. **批量 insert**、参数化 `?`、`count(*)`、重复主键 latest-wins 都对。
+3. **批量 insert**、参数化 `?`、`count(*)`、重复主键报错(写一次)都对。
 
 ## 不在这测什么
 
