@@ -1,6 +1,6 @@
 # seekbase
 
-一个 supabase 风格的数据端口,**把语义 `search()` 做成一等算子**——结构化/分析走 DuckDB,向量走 LanceDB,再加一份本地文件镜像用于审计。一个端口、一个目录、零运维。
+一个 supabase 风格的数据端口,**把 `search()` 做成一等算子**——**单引擎 DuckDB** 一库通吃:结构化/分析、向量语义(`vss`/HNSW)、全文检索(`fts`/BM25),`search()` 是 hybrid(向量 + BM25 用 RRF 融合、中文用 jieba 分词);再加一份本地文件镜像用于审计。一个端口、一个文件、零运维。
 
 **两种使用形态,一套完全相同的 API:**
 
@@ -11,7 +11,7 @@
 
 两种形态的**调用代码逐字节相同**——`query(sql)` / `insert` / `delete` 一个字都不用改,变的只有你怎么拿到 `db` 句柄。
 
-> **状态:M1–M4 已落(核心完整)。** SQL `query`(结构化 + 语义 `search()` + `ds` 时间窗)、异步 ticket 写(`insert`/`delete`)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、向量侧(LanceDB + outbox consumer)、两种使用形态,今天都能跑。**delete 只打 `deleted_ds` 墓碑、历史永久保留,没有物理删/vacuum**。完整设计见 [DESIGN.md](DESIGN.md)。
+> **状态:M1–M5 已落(核心完整,含单引擎切换)。** SQL `query`(结构化 + hybrid `search()` + `ds` 时间窗)、异步 ticket 写(`insert`/`delete`)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、检索侧(**DuckDB `vss`+`fts`,单引擎、无 LanceDB** + outbox consumer)、两种使用形态,今天都能跑。**delete 只打 `deleted_ds` 墓碑、历史永久保留,没有物理删/vacuum**。完整设计见 [DESIGN.md](DESIGN.md)。
 
 ## 安装
 
@@ -35,7 +35,7 @@ SCHEMA = [
             {"name": "kind",    "type": "str"},
         ],
         "primary": "card_id",
-        "searchable": ["issue"],                 # (向量引擎落地后生效)
+        "searchable": ["issue"],                 # 可 search() 的列(hybrid:vss 向量 + fts 全文)
     },
 ]
 
@@ -88,12 +88,12 @@ await db.close()
 
 - **只增、引擎强制**:没有 `update`/`upsert`;`delete()` 只写一列 `deleted_at` 墓碑。历史因此诚实——时光机对**所有列**都严谨。
 - **业务无关**:不认识任何业务概念、不读任何 config——由你注入 `data_dir`、`schema`,以及(要 search 时)一个 `embedder`。
-- **调用方永远不见向量**:声明 `searchable` 列;SQL 里 `search(列, 'text')` 自动 embed + 检索(每个可搜列各自一个向量索引)+ 在同一条 SQL 里和结构化过滤组合。
+- **调用方永远不见向量**:声明 `searchable` 列;SQL 里 `search(列, 'text')` 自动 embed + jieba 分词 + hybrid 检索(每个可搜列各自一套 vss 向量 + fts 全文,RRF 融合)+ 在同一条 SQL 里和结构化过滤组合。
 
 ## 文档
 
 - [DESIGN.md](DESIGN.md) —— 整体设计
 - [docs/api/](docs/api/) —— API 参考(query / insert / delete / admin / setup,每个接口的请求·响应·错误)
-- [docs/works/](docs/works/) —— 专题设计:[store.md](docs/works/store.md)(三写形态 files/DuckDB/LanceDB)
+- [docs/works/](docs/works/) —— 专题设计:[store.md](docs/works/store.md)(两层存储 files/DuckDB)、[search.md](docs/works/search.md)(vss+fts hybrid 检索)
 
 Apache-2.0。

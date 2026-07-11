@@ -1,6 +1,6 @@
 # time_machine — 用 `ds` 日期分区实现时光机(完备设计)
 
-> 状态:**M4 已落**(可见性视图 + `ds_start`/`ds_end` 裁剪)。本文把「时光机」用 `ds` 分区讲完备:需要**两对**日期字段(创建 / 删除),给出可见性判定、`ds_start`/`ds_end` 的完整语义、完备性真值表、三写落地、以及「无物理删」的取舍。存储与文件布局见 [store.md](store.md)。
+> 状态:**M4 已落**(可见性视图 + `ds_start`/`ds_end` 裁剪)。本文把「时光机」用 `ds` 分区讲完备:需要**两对**日期字段(创建 / 删除),给出可见性判定、`ds_start`/`ds_end` 的完整语义、完备性真值表、两层存储落地、以及「无物理删」的取舍。存储与文件布局见 [store.md](store.md)。
 
 ## 1. 目标
 
@@ -37,7 +37,7 @@
 - 收集该 pk **day ≤ D** 的所有事件(put 用 `ds`、del 用 `deleted_ds`);
 - 按 `_seq` 取**最新**一条:是 **put** → 该行存活,数据 = 那一版;是 **del** → 隐藏。
 
-SQL 上就是一个窗口视图:`row_number() OVER (PARTITION BY pk ORDER BY _seq DESC)`,取 `rn = 1` 且该事件是 put(`ds IS NOT NULL`)。当前态(不倒带)= 不加 day 上界。`search()` 复用这个视图(向量结果按 pk join 进来)。
+SQL 上就是一个窗口视图:`row_number() OVER (PARTITION BY pk ORDER BY _seq DESC)`,取 `rn = 1` 且该事件是 put(`ds IS NOT NULL`)。当前态(不倒带)= 不加 day 上界。`search()` 复用这个视图(hybrid 检索结果按 pk join 进来)。
 
 > **为什么不是「一行 + `deleted_ds` 谓词」**:那种「单行就地改 `deleted_ds`」的写法只对「建一次、删一次」的行成立;一旦**删了又重插**(seekbase 的「改」= 追加新版本),单行谓词就丢了旧版本、as-of 到重插之前会出错。**事件重放对任意 create/delete/re-insert 历史都对**(§6),代价是查询多一层窗口。
 
@@ -67,12 +67,13 @@ SQL 上就是一个窗口视图:`row_number() OVER (PARTITION BY pk ORDER BY _se
 
 「单行 + `deleted_ds` 谓词」在 `day03` 会漏掉 v1(派生表只剩 v2)——事件重放不会。单次生命周期是它的特例。有一个白盒测试锁住这四行(`tests/time_machine`)。
 
-## 7. 落到三写(files / DuckDB / 向量)
+## 7. 落到两层存储(files / DuckDB 事件表 + 检索派生表)
 
-时间维度怎么在 [store.md](store.md) 的三写里维护(**files 与 DuckDB 都是纯 append**):
+时间维度怎么在 [store.md](store.md) 的两层里维护(**files 与 DuckDB 事件表都是纯 append**):
 
 - **insert 事件** → 往**创建日** `files/ds=C/<表>.jsonl` append 一行快照;DuckDB `_sb_<表>` INSERT 一条 **put** 事件(business + `ds`/`created_at` + `_seq`)。
 - **delete 事件** → 往**删除日** `files/ds=X/<表>.jsonl` append 一条墓碑 `{"_deleted": "<pk>", "deleted_at": "…"}`;DuckDB INSERT 一条 **del** 事件(pk + `deleted_ds`/`deleted_at` + `_seq`,business 列 NULL、`ds` NULL)。**两边都不回改任何已写的行。**
+- **检索派生表**(vss+fts)只存**当前态**:`search()` 返回当前态候选,再 join 重放视图做 as-of 裁剪(§4;见 [search.md](search.md))。
 - **查询**只碰派生表的重放视图(§4),不扫文件;文件是审计 + `rebuild` 源。
 - `ls files/ds=D/` = **「D 那天发生的事」**。rebuild = 按 `ds` 顺序 replay 所有 `<表>.jsonl`,put→INSERT put 事件、`_deleted`→INSERT del 事件(`_seq` 按 replay 顺序,保住时序)。
 
@@ -94,6 +95,6 @@ SQL 上就是一个窗口视图:`row_number() OVER (PARTITION BY pk ORDER BY _se
 
 ## 10. 和其他文档的关系
 
-- [store.md](store.md):三写与文件布局(顶层 `ds=YYYYMMDD` 分区、每表 `<表>.jsonl`、原子性);本文补「时间维度」的完备性。
+- [store.md](store.md):两层存储与文件布局(顶层 `ds=YYYYMMDD` 分区、每表 `<表>.jsonl`、原子性);本文补「时间维度」的完备性。
 - [api/query.md](../api/query.md):`ds_start`/`ds_end` 的对外接口;§5 是它的语义定义。
 - [api/setup.md](../api/setup.md):`ds` / `deleted_ds` 作为引擎代管列的声明位置。

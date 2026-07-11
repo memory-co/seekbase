@@ -1,6 +1,6 @@
 # Insert API
 
-写数据。**异步**:提交要写的行,拿回一个 `ticket`,不阻塞等落盘;再用状态接口按 `ticket` 轮询这次写入什么时候真正兑现(files → 行 → 向量)。
+写数据。**异步**:提交要写的行,拿回一个 `ticket`,不阻塞等落盘;再用状态接口按 `ticket` 轮询这次写入什么时候真正兑现(files → 行 → 检索派生表 vss+fts)。
 
 **只增**:没有 update / upsert;「改」= 追加新行(旧行由 [delete](delete.md) 打墓碑)。
 
@@ -44,7 +44,7 @@ await db.wait(ticket)                   # 或阻塞到 done / failed
 
 ### 副作用
 
-写入按 files → 行 → 向量的顺序兑现(见 [`../works/store.md`](../works/store.md)):**文件最先** append 进 `ds=今天/<表>.jsonl`(canonical),再往 DuckDB **INSERT 一条 put 事件**(纯 append),最后(M3)异步补向量。任一步崩溃可从文件 `rebuild`/校准。
+写入按 files → 行 → 检索的顺序兑现(见 [`../works/store.md`](../works/store.md)):**文件最先** append 进 `ds=今天/<表>.jsonl`(canonical),再往 DuckDB **INSERT 一条 put 事件**(纯 append),最后(M3/M5)异步补检索派生表(embed + jieba → vss 向量 + fts 全文)。任一步崩溃可从文件 `rebuild`/校准。
 
 ### 错误
 
@@ -85,4 +85,4 @@ await db.wait(ticket)                   # 或阻塞到 done / failed
 
 - 提交 / 查状态接口:✅ 可用。
 - **文件镜像(M2)✅**:`insert` 先 append 进 `<表>.jsonl`,再写 DuckDB 行;`rebuild` 能从文件重灌(见 [admin.md](admin.md))。
-- **向量侧异步(M3)✅**:`insert` 把 searchable 列的 embed 作业入 outbox,后台 consumer 异步兑现(embed → LanceDB);ticket 在向量作业排干前是 `pending`,`wait` 到 `done` 后 `search()` 能搜到。无 searchable 列的表 ticket 立即 `done`。
+- **检索侧异步(M3/M5)✅**:`insert` 把 searchable 列的作业入 outbox,后台 consumer 异步兑现(embed + jieba 分词 → DuckDB `vss` 向量行(HNSW 增量)+ 批末重建 `fts` 全文索引);ticket 在检索作业排干前是 `pending`,`wait` 到 `done` 后 `search()` 能搜到。无 searchable 列的表 ticket 立即 `done`。

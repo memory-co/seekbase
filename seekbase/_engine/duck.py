@@ -104,14 +104,26 @@ class DuckdbEngine:
         self._conn = conn
         self._schema = schema
         self._mirror = mirror
+        self._search = None            # SearchEngine (vss+fts) or None if no searchable
 
     @classmethod
-    async def open(cls, data_dir: Path, schema: Schema, bridge: Bridge) -> "DuckdbEngine":
+    async def open(
+        cls, data_dir: Path, schema: Schema, bridge: Bridge, embedder=None
+    ) -> "DuckdbEngine":
         data_dir = Path(data_dir)
         conn = await bridge.run(lambda: duckdb.connect(str(data_dir / "duck.db")))
         engine = cls(bridge, conn, schema, FileMirror(data_dir / "files"))
         await bridge.run(engine._create_tables)
+        if embedder is not None and any(s.searchable for s in schema.tables):
+            from .search import SearchEngine
+
+            engine._search = await SearchEngine.create(bridge, conn, schema, embedder)
         return engine
+
+    @property
+    def search(self):
+        """The vss+fts SearchEngine, or None when no column is searchable."""
+        return self._search
 
     # ─── DDL (append-only event tables; no primary key, no update) ─────
 
@@ -336,6 +348,8 @@ class DuckdbEngine:
             for spec in self._schema.tables:
                 self._conn.execute(f"DELETE FROM {_phys(spec.name)}")
             self._conn.execute("DELETE FROM _sb_outbox")
+            if self._search is not None:
+                self._search.reset_inline()   # clear derived vec/fts; consumer refills
             for spec in self._schema.tables:
                 tables += 1
                 for ds, rec in self._mirror.iter_events(spec.name):

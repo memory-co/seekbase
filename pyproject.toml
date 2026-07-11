@@ -1,16 +1,17 @@
 [project]
 name = "seekbase"
 version = "0.0.1"
-description = "A supabase-style embedded data port with semantic search as a first-class operator (DuckDB + LanceDB)."
+description = "A supabase-style embedded data port with semantic search as a first-class operator (single-engine DuckDB: vss + fts)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "seekbase" }]
-keywords = ["duckdb", "lancedb", "orm", "vector-search", "embedded-database"]
+keywords = ["duckdb", "vss", "fts", "orm", "vector-search", "embedded-database"]
 dependencies = [
-    "duckdb>=1.1",       # structured/analytical engine
-    "lancedb>=0.13",     # vector engine (search()); loaded only when a schema has searchable cols
+    "duckdb>=1.1",       # single engine: structured + vector (vss/HNSW) + full-text (fts/BM25)
+    "jieba>=0.42",       # Chinese tokenizer for full-text (BM25) search
     "httpx>=0.27",       # HTTP client (Seekbase.connect) + default embedder (ApiEmbedder)
+    # vss + fts are DuckDB extensions, INSTALL/LOAD-ed at open() (no extra pip dep).
     # server is standard via seekbase_server() — a zero-dep hand-rolled ASGI app.
     # The ASGI *runner* (uvicorn/hypercorn/…) is injected by the host, not bundled.
 ]

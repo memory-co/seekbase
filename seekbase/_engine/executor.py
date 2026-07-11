@@ -1,12 +1,14 @@
 """Executors — the seam between the two forms.
 
-``LocalExecutor`` runs a Request against the in-process DuckdbEngine + a
-VectorEngine, and runs a background consumer that drains the outbox (embed →
-LanceDB). ``HttpExecutor`` calls the matching HTTP endpoint on a server.
+``LocalExecutor`` runs a Request against the in-process DuckdbEngine (whose
+``search`` is the vss+fts SearchEngine), and runs a background consumer that
+drains the outbox: embed + tokenize → write the DuckDB vector column (HNSW is
+incremental) → rebuild the touched FTS index. ``HttpExecutor`` calls the
+matching HTTP endpoint on a server.
 
 Writes return a ticket; its state is derived from the outbox (``pending`` until
-the ticket's vector jobs are drained, else ``done``). Tables with no searchable
-column enqueue nothing → their tickets are ``done`` immediately.
+the ticket's vector/FTS jobs are drained, else ``done``). Tables with no
+searchable column enqueue nothing → their tickets are ``done`` immediately.
 """
 from __future__ import annotations
 
@@ -28,16 +30,16 @@ def _new_ticket() -> str:
 
 
 class LocalExecutor:
-    def __init__(self, bridge: Bridge, duck: DuckdbEngine, vector=None) -> None:
+    def __init__(self, bridge: Bridge, duck: DuckdbEngine) -> None:
         self._bridge = bridge
         self._duck = duck
-        self._vector = vector
+        self._search = duck.search           # vss+fts engine (or None)
         self._tickets: dict[str, dict] = {}
         self._stop = False
         self._consumer: asyncio.Task | None = None
 
     async def start(self) -> None:
-        if self._vector is not None:
+        if self._search is not None:
             self._consumer = asyncio.create_task(self._consume())
 
     @property
@@ -73,12 +75,12 @@ class LocalExecutor:
         rewritten, specs = extract_searches(sql)
         searches = None
         if specs:
-            if self._vector is None:
+            if self._search is None:
                 raise QueryError("search() needs a searchable column + an embedder")
             searches = []
             for col, text, name in specs:
                 target = search_target(self._duck.schema, sql, col)
-                results = await self._vector.search(target, col, text, _SEARCH_K)
+                results = await self._search.hybrid(target, col, text, _SEARCH_K)
                 searches.append((target, name, results))
             sql = rewritten
         return await self._duck.query(
@@ -103,15 +105,30 @@ class LocalExecutor:
             if not jobs:
                 await asyncio.sleep(0.02)
                 continue
+            # 1) apply vector upserts/deletes (HNSW is incremental)
+            done_seqs: list[int] = []
+            affected: set[tuple[str, str]] = set()
             for seq, tbl, col, op, pk, txt in jobs:
                 try:
                     if op == "upsert":
-                        await self._vector.upsert(tbl, col, pk, txt)
+                        await self._search.upsert(tbl, col, pk, txt)
                     else:
-                        await self._vector.delete(tbl, col, pk)
-                    await self._duck.outbox_mark_done(seq)
+                        await self._search.delete(tbl, col, pk)
+                    affected.add((tbl, col))
+                    done_seqs.append(seq)
                 except Exception:
-                    await asyncio.sleep(0.05)  # transient (e.g. embedder) → retry later
+                    pass  # transient (e.g. embedder) → leave pending, retry next loop
+            # 2) FTS is a static snapshot → rebuild the touched (table,col) indexes
+            #    BEFORE marking done, so wait(ticket)→done implies search() sees it.
+            for tbl, col in affected:
+                try:
+                    await self._search.rebuild_fts(tbl, col)
+                except Exception:
+                    pass
+            for seq in done_seqs:
+                await self._duck.outbox_mark_done(seq)
+            if not done_seqs:
+                await asyncio.sleep(0.05)
 
     async def close(self) -> None:
         self._stop = True
@@ -119,9 +136,7 @@ class LocalExecutor:
             self._consumer.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._consumer
-        if self._vector is not None:
-            await self._vector.close()
-        await self._duck.close()
+        await self._duck.close()          # closes the single connection (vss+fts included)
         self._bridge.close()
 
 

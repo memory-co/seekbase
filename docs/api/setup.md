@@ -17,7 +17,7 @@ db = await Seekbase.open(
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
-| `data_dir` | 是 | 实例目录;`duck.db` / `lance/` / `files/` 都落这里,拷走目录 = 拷走整个库 |
+| `data_dir` | 是 | 实例目录;`duck.db`(结构化 + vss + fts 单文件)/ `files/`(canonical 镜像)都落这里,拷走目录 = 拷走整个库 |
 | `schema` | 是 | 声明式表结构(§3) |
 | `embedder` | 视情况 | schema 有 `searchable` 列时必填,否则 `EmbedderInvalid` |
 
@@ -41,7 +41,7 @@ db = await Seekbase.connect(
 
 ```python
 db.ready            # bool(对应 GET /v1/health 的 ready)
-await db.close()    # 嵌入:关 DuckDB/Lance/文件;客户端:关 httpx
+await db.close()    # 嵌入:关 DuckDB(含 vss/fts)+ 停 consumer;客户端:关 httpx
 async with await Seekbase.open(data_dir, schema=SCHEMA) as db:
     ...             # 退出自动 close()
 ```
@@ -72,7 +72,7 @@ serve(db, host="0.0.0.0", port=8000, api_key="secret", runner=None)
 
 ## 3. 声明 schema
 
-表结构声明一次,DDL / 双引擎同步 / 文件镜像全由 seekbase 管。`open` / server 启动时校验一次——**坏形状当场报错**。设计与推导(一处声明 → 三引擎)见 [`../works/schema.md`](../works/schema.md)。
+表结构声明一次,DDL / vss+fts 检索派生 / 文件镜像全由 seekbase 管。`open` / server 启动时校验一次——**坏形状当场报错**。设计与推导(一处声明 → 单引擎 DuckDB + 文件)见 [`../works/schema.md`](../works/schema.md)。
 
 **SCHEMA 是有序列表**(表名做 `table` 字段),列也是有序列表 `{name, type}`;主键单独走 `primary` 字段:
 
@@ -86,7 +86,7 @@ SCHEMA = [
             {"name": "kind",    "type": "str"},
         ],
         "primary": "card_id",
-        "searchable": ["issue"],                 # 可选:可 search() 的列(写入自动 embed)
+        "searchable": ["issue"],                 # 可选:可 search() 的列(写入自动 embed + jieba 分词)
     },
 ]
 ```
@@ -97,9 +97,9 @@ SCHEMA = [
 - **声明式、不从首行推断**(避免首行 null 把列判成 string)。
 - `ds` / `created_at` / `deleted_ds` / `deleted_at` 是**引擎代管的元数据列**,自动加、**不许自己声明**:`ds`/`deleted_ds`(天,`YYYYMMDD`,分区 / 时光机判定)+ `created_at`/`deleted_at`(精确时刻)。见 [`../works/time_machine.md`](../works/time_machine.md)。
 
-**`primary`** —— 表级单独字段,主键列名。每表有且仅有一个;须是 `str` / `int` 列;是三引擎对齐的锚。
+**`primary`** —— 表级单独字段,主键列名。每表有且仅有一个;须是 `str` / `int` 列;是各层(事件表 / vss+fts 派生表 / 文件)对齐的锚。
 
-**`searchable`**(可选)—— 哪些列可被 `search()` 检索,**必须是 `str` 列**。声明了 ⇒ **必须注入 embedder**(否则 `EmbedderInvalid`);没有则是纯 DuckDB 表、零向量开销。
+**`searchable`**(可选)—— 哪些列可被 `search()` 检索(hybrid:vss 向量 + fts 全文),**必须是 `str` 列**。声明了 ⇒ **必须注入 embedder**(否则 `EmbedderInvalid`);没有则是纯结构化表、零检索开销。`vss`/`fts` 是 DuckDB 扩展,`open()` 时自动 `INSTALL/LOAD`(首次需联网),中文分词用内置 `jieba`。
 
 **文件镜像**:**每表自动**落成按天分区的 `<表>.jsonl`(无 `files` 声明),详见 [`../works/store.md`](../works/store.md)。
 

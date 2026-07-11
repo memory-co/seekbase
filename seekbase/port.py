@@ -48,12 +48,8 @@ class Seekbase:
                 "schema declares searchable columns but no embedder was provided"
             )
         bridge = Bridge()
-        duck = await DuckdbEngine.open(data_dir, parsed, bridge)
-        vector = None
-        if has_searchable:
-            from ._engine.vector import VectorEngine
-            vector = await VectorEngine.create(data_dir / "lance", embedder, parsed)
-        executor = LocalExecutor(bridge, duck, vector)
+        duck = await DuckdbEngine.open(data_dir, parsed, bridge, embedder=embedder)
+        executor = LocalExecutor(bridge, duck)
         await executor.start()
         return cls(executor)
 

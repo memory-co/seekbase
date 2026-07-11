@@ -3,7 +3,7 @@
 读接口:**传一段 SQL,拿回行**。结构化查询、语义检索、时光机都在这一个接口里——
 
 - **结构化**:普通 `SELECT`(join / 聚合 / 窗口都行)。
-- **语义检索**:SQL 里用 `search(列, '文本')` 函数(指定搜哪一列),自动 embed + 向量检索,暴露 `_score_<列>` 列(多个 search 各自一个),和结构化过滤写在同一条 SQL 里(**不单独开搜索接口**)。
+- **hybrid 检索**:SQL 里用 `search(列, '文本')` 函数(指定搜哪一列),自动 embed + jieba 分词,向量语义(vss)+ BM25 全文(fts)RRF 融合,暴露 `_score_<列>` 列(多个 search 各自一个),和结构化过滤写在同一条 SQL 里(**不单独开搜索接口**)。
 - **时间窗 / 时光机**:请求参数 `ds_start` / `ds_end` 按日期分区圈定时间窗——只给 `ds_end` = 回到那天(时光机),两个都给 = 查一个时间段。
 
 只读:必须是**单条 `SELECT`**——写走 [insert.md](insert.md) / [delete.md](delete.md)。schema / embedder 见 [setup.md](setup.md)。
@@ -56,9 +56,9 @@
 
 ---
 
-## `search()` — SQL 里的语义检索
+## `search()` — SQL 里的 hybrid 检索(语义 + 全文)
 
-`search(列, '文本')` 是查询里的一个函数,不是另一个接口。`列` 是该表的一个 `searchable` 列(每个可搜列各自一个向量索引)。出现它时,seekbase 自动:① 用注入的 embedder 把文本变向量;② 到**那一列**的向量索引检索;③ 与 SQL 其余谓词组合;④ 暴露一个 `_score_<列>` 列(相似度;单个 search 时也附便捷别名 `_score`)。
+`search(列, '文本')` 是查询里的一个函数,不是另一个接口。`列` 是该表的一个 `searchable` 列(每个可搜列各自一套向量 + 全文索引)。出现它时,seekbase 自动:① 用注入的 embedder 把文本变向量,同时用 **jieba** 分词(中文也切得动);② 在**那一列**上做 **hybrid 检索**——向量语义(`vss`/cosine)+ BM25 关键词(`fts`),用 **RRF** 融合成一个分;③ 与 SQL 其余谓词组合;④ 暴露一个 `_score_<列>` 列(融合分;单个 search 时也附便捷别名 `_score`)。全在 **DuckDB 单引擎**内(无 LanceDB)。
 
 ```json
 {
@@ -74,8 +74,8 @@
 }
 ```
 
-- **在 `WHERE` 里**:把结果限定为语义命中的行;结构化谓词(`kind = 'issue'`)下推到向量检索里,保「先过滤后取 top-k」。
-- **score 列**:每个 `search(列, …)` 暴露一个 `_score_<列>`(相似度),可在 `SELECT` / `ORDER BY` 里用。**一条 query 可有多个 `search()`**(搜不同列),各自一个 `_score_<列>`;只有一个 `search()` 时额外附便捷别名 `_score`。不带 `search()` 的查询没有这些列。
+- **在 `WHERE` 里**:把结果限定为检索命中的行;结构化谓词(`kind = 'issue'`)在外层 SQL 上和检索结果 join 组合。
+- **score 列**:每个 `search(列, …)` 暴露一个 `_score_<列>`(vss+fts 的 RRF 融合分,越大越相关),可在 `SELECT` / `ORDER BY` 里用。**一条 query 可有多个 `search()`**(搜不同列),各自一个 `_score_<列>`;只有一个 `search()` 时额外附便捷别名 `_score`。不带 `search()` 的查询没有这些列。
 
 ```json
 // 多列:各自 _score_<列>(不能写 _score.列——SQL 里点是 table.column)
@@ -83,9 +83,9 @@
 ```
 
 - 只对已声明的 `searchable` 列用 `search()`;否则 `QueryError`。
-- **调用方永远不见向量、不算 embedding**——只写文本。
+- **调用方永远不见向量、不算 embedding、不管分词**——只写文本。检索设计见 [`../works/search.md`](../works/search.md)。
 
-> **一致性**:向量侧最终一致,`search()` 可能滞后于刚提交的写入(通常毫秒级);要读己之写,等这次写入的 ticket 到 `done`(见 [insert.md](insert.md))。结构化查询(不带 `search()`)永远强一致。
+> **一致性**:检索侧(vss+fts)最终一致,`search()` 可能滞后于刚提交的写入(通常毫秒级);要读己之写,等这次写入的 ticket 到 `done`(见 [insert.md](insert.md))。结构化查询(不带 `search()`)永远强一致。
 
 ---
 
@@ -118,5 +118,5 @@
 ## 现状
 
 - 普通结构化 SQL 查询:✅ 可用。
-- `search()`(LanceDB 向量检索 + `_score`,与结构化过滤 / 时间窗组合):**✅ 可用(M3)**。向量由后台 consumer 从 outbox 异步兑现,`wait(ticket)` 排干后可搜到。
+- `search()`(DuckDB `vss`+`fts` hybrid + RRF `_score`,与结构化过滤 / 时间窗组合):**✅ 可用(M3/M5)**。向量 + 全文由后台 consumer 从 outbox 异步兑现(HNSW 增量、FTS 批末重建),`wait(ticket)` 排干后可搜到。
 - `ds_start` / `ds_end` 时间窗按 `ds` 列裁剪:✅ 可用(可见性视图);顶层文件物理分区目录 M2 已落。

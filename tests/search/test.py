@@ -92,12 +92,62 @@ async def test_multiple_searches_expose_per_column_scores(tmp_path):
         await db.close()
 
 
+async def test_chinese_hybrid_search(tmp_path):
+    """中文:search() = vss(向量语义)+ fts(BM25 关键词,jieba 分词)RRF 融合。
+    关键词命中由 BM25 保证,和 embedder 语义质量无关。"""
+    schema = [{
+        "table": "notes",
+        "columns": [{"name": "id", "type": "str"}, {"name": "body", "type": "str"}],
+        "primary": "id",
+        "searchable": ["body"],
+    }]
+    db = await open_db(tmp_path, schema=schema)
+    try:
+        await db.wait(await db.insert("notes", [
+            {"id": "n1", "body": "为什么伪终端 pty 会让人联想到 tmux 终端复用器"},
+            {"id": "n2", "body": "Redis 缓存淘汰策略 LRU 与 LFU 的对比"},
+            {"id": "n3", "body": "机器学习里的向量嵌入与近邻相似度检索"},
+        ]))
+        hits = await db.query(
+            "SELECT id, _score FROM notes WHERE search(body, '缓存淘汰') ORDER BY _score DESC")
+        assert hits[0]["id"] == "n2"          # '缓存淘汰' 经 jieba→BM25 命中 n2
+        assert all(h["_score"] is not None for h in hits)
+    finally:
+        await db.close()
+
+
 async def test_deleted_row_is_not_searchable(db):
     await _seed(db)
     await db.wait(await db.delete("cards", where="card_id = ?", params=["c3"]))
     hits = await db.query(
         "SELECT card_id FROM cards WHERE search(issue, 'pty tmux terminal') ORDER BY _score DESC")
     assert "c3" not in [h["card_id"] for h in hits]
+
+
+async def test_rebuild_repopulates_search(tmp_path):
+    """rebuild() clears the derived vss+fts projection and replays the file
+    mirror; the consumer must repopulate it so search() works again."""
+    schema = [{
+        "table": "notes",
+        "columns": [{"name": "id", "type": "str"}, {"name": "body", "type": "str"}],
+        "primary": "id",
+        "searchable": ["body"],
+    }]
+    db = await open_db(tmp_path, schema=schema)
+    try:
+        await db.wait(await db.insert("notes", [
+            {"id": "n1", "body": "缓存淘汰策略 LRU"},
+            {"id": "n2", "body": "终端复用器 tmux"},
+        ]))
+        before = {r["id"] for r in await db.query(
+            "SELECT id FROM notes WHERE search(body, '缓存淘汰')")}
+        await db.wait(await db.rebuild())
+        after = {r["id"] for r in await db.query(
+            "SELECT id FROM notes WHERE search(body, '缓存淘汰')")}
+        assert "n1" in before and "n1" in after   # BM25 keyword hit survives rebuild
+        assert before == after                     # rebuild repopulated the same projection
+    finally:
+        await db.close()
 
 
 async def test_search_respects_time_window(db):

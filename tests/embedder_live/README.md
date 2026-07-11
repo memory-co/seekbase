@@ -3,7 +3,7 @@
 ## 这个场景在测什么
 
 用**真实的 `ApiEmbedder`**(OpenAI 兼容 `/embeddings` 端点)跑一遍 insert →
-outbox consumer 异步 embed → LanceDB → `search()` 语义排序,验证真 embedding 下
+outbox consumer 异步 embed → DuckDB `vss`+`fts` 派生表 → `search()` hybrid 排序,验证真 embedding 下
 语义命中正确。**默认 skip**:只有设了环境变量才跑,所以不影响 CI / 没 key 的人。
 
 ## 怎么跑
