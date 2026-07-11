@@ -1,18 +1,16 @@
-"""Transport-neutral request type.
+"""Request — the transport-neutral unit that flows through an executor.
 
-``Request`` is the single unit that flows through an executor — embedded
-(straight to DuckDB) or over HTTP (serialized to the server). One shape both
-sides agree on. Operations mirror the API docs:
+Built by the port; run either straight against the services (LocalExecutor) or
+serialized to an HTTP endpoint (HttpExecutor). One shape both forms agree on:
 
   read:   query
-  write:  insert / delete            (async: return a ticket)
-  poll:   status                     (GET /v1/writes/{ticket})
+  write:  insert / delete
+  poll:   status
   admin:  rebuild
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -30,7 +28,3 @@ class Request:
     # poll / admin
     ticket: str | None = None         # status
     _extra: dict = field(default_factory=dict)
-
-
-# result carriers (plain dicts on the wire; these are just for clarity)
-Row = dict[str, Any]

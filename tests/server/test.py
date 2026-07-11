@@ -26,7 +26,7 @@ async def test_delete_over_http(pair):
     _, client = pair
     await client.wait(await client.insert("cards", {"card_id": "c1", "issue": "x", "kind": "k", "n": 1}))
     st = await client.wait(await client.delete("cards", where="card_id = ?", params=["c1"]))
-    assert st["matched"] == 1
+    assert st.matched == 1
     (c,) = await client.query("SELECT count(*) AS c FROM cards")
     assert c["c"] == 0
 

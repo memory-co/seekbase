@@ -17,10 +17,10 @@ from ._engine.bridge import Bridge
 from ._engine.duck import DuckdbEngine
 from ._engine.executor import HttpExecutor, LocalExecutor
 from ._engine.files import FileMirror
-from ._engine.plan import Request, Row
 from ._types import Embedder, EmbedderInvalid
 from .schema import parse_schema
 from .service import build_services
+from .struct import Request, Row, Ticket
 
 
 class Seekbase:
@@ -90,35 +90,35 @@ class Seekbase:
         ))
         return res["rows"]
 
-    # ─── write (async: returns a ticket) ───────────────────────────────
+    # ─── write (returns a ticket id; poll its Ticket via write_status) ──
 
     async def insert(self, table: str, rows: dict | list[dict]) -> str:
         batch = [rows] if isinstance(rows, dict) else list(rows)
-        res = await self._exec.execute(Request(op="insert", table=table, rows=tuple(batch)))
-        return res["ticket"]
+        t = await self._exec.execute(Request(op="insert", table=table, rows=tuple(batch)))
+        return t.id
 
     async def delete(self, table: str, *, where: str, params: list | None = None) -> str:
-        res = await self._exec.execute(Request(
+        t = await self._exec.execute(Request(
             op="delete", table=table, where=where, params=tuple(params or ()),
         ))
-        return res["ticket"]
+        return t.id
 
-    async def write_status(self, ticket: str) -> dict:
+    async def write_status(self, ticket: str) -> Ticket:
         return await self._exec.execute(Request(op="status", ticket=ticket))
 
-    async def wait(self, ticket: str, *, poll: float = 0.05) -> dict:
-        """Block until the write settles (``done`` / ``failed``)."""
+    async def wait(self, ticket: str, *, poll: float = 0.05) -> Ticket:
+        """Block until the write settles, returning its :class:`Ticket`."""
         while True:
             st = await self.write_status(ticket)
-            if st.get("state") != "pending":
+            if st.state != "pending":
                 return st
             await asyncio.sleep(poll)
 
     # ─── admin ─────────────────────────────────────────────────────────
 
     async def rebuild(self) -> str:
-        res = await self._exec.execute(Request(op="rebuild"))
-        return res["ticket"]
+        t = await self._exec.execute(Request(op="rebuild"))
+        return t.id
 
     # ─── lifecycle ─────────────────────────────────────────────────────
 

@@ -7,7 +7,7 @@ re-apply the soft-deletes, and refresh each table's FTS index once.
 from __future__ import annotations
 
 from .._engine.clock import now
-from ..schema import CREATED_AT, DELETED_AT, DS
+from ..struct import CREATED_AT, DELETED_AT, DS
 
 
 class AdminService:
@@ -58,4 +58,4 @@ class AdminService:
                 await self._duck.soft_delete(spec.name, [pk_val], dds, dat)
                 result["tombstones"] += 1
             await self._duck.rebuild_fts(spec.name)
-        return self._tickets.issue("rebuild", {"stats": result})
+        return self._tickets.issue("rebuild", stats=result)

@@ -20,7 +20,7 @@ from typing import Any
 import duckdb
 
 from .._types import QueryError, ReadOnlyError
-from ..schema import CREATED_AT, DELETED_AT, DELETED_DS, DS, Schema, TableSpec
+from ..struct import CREATED_AT, DELETED_AT, DELETED_DS, DS, Schema, TableSpec
 from .bridge import Bridge
 from .search import SearchEngine, tokcol, veccol
 

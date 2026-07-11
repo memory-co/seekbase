@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .._engine.clock import now, today
 from .._types import QueryError
-from ..schema import CREATED_AT, DELETED_AT, DS
+from ..struct import CREATED_AT, DELETED_AT, DS
 
 
 class WriteService:
@@ -21,7 +21,7 @@ class WriteService:
         self._schema = schema
         self._tickets = tickets
 
-    async def insert(self, table: str, rows: list[dict]) -> dict:
+    async def insert(self, table: str, rows: list[dict]):
         spec = self._schema.table(table)
         records: list[dict] = []
         for row in rows:
@@ -49,9 +49,9 @@ class WriteService:
                  for rec in records]
         await self._bridge.run(lambda: [self._files.append(ds, table, m) for m in mrecs])
         await self._duck.commit_rows(spec, records, vecs, toks, ds, ts)
-        return self._tickets.issue("insert")
+        return self._tickets.issue("insert")   # -> struct.Ticket
 
-    async def delete(self, table: str, where: str | None, params) -> dict:
+    async def delete(self, table: str, where: str | None, params):
         if not where:
             raise QueryError("delete requires a where clause")
         keys = await self._duck.match_live(table, where, list(params))
@@ -59,4 +59,4 @@ class WriteService:
         await self._bridge.run(
             lambda: [self._files.append(ds, table, {"_deleted": k, DELETED_AT: ts}) for k in keys])
         await self._duck.soft_delete(table, keys, ds, ts)
-        return self._tickets.issue("delete", {"matched": len(keys)})
+        return self._tickets.issue("delete", matched=len(keys))

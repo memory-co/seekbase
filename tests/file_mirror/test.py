@@ -62,7 +62,7 @@ async def test_rebuild_restores_exact_state_from_files(tmp_path):
         assert empty["c"] == 0
 
         st = await db2.wait(await db2.rebuild())
-        assert st["state"] == "done"
+        assert st.state == "done"
 
         rows = await db2.query("SELECT id, text FROM notes ORDER BY id")
         assert rows == [{"id": "n2", "text": "b"}]   # n1 deleted (soft), n2 survives

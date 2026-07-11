@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 from .._types import QueryError
-from ..schema import Schema
+from ..struct import Schema
 
 _SEARCH_RE = re.compile(
     r"search\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*'((?:[^']|'')*)'\s*\)", re.IGNORECASE)

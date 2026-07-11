@@ -39,7 +39,7 @@ async def test_reinsert_same_key_errors(db):
 async def test_insert_ticket_settles_done(db):
     ticket = await db.insert("cards", {"card_id": "c1", "issue": "x", "kind": "k", "n": 1})
     st = await db.wait(ticket)
-    assert st["ticket"] == ticket and st["state"] == "done"
+    assert st.id == ticket and st.state == "done"
 
 
 async def test_context_manager(tmp_path):

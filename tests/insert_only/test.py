@@ -11,7 +11,7 @@ async def test_delete_is_a_tombstone(db):
     await db.wait(await db.insert("cards", {"card_id": "c1", "issue": "x", "kind": "k", "n": 1}))
 
     st = await db.wait(await db.delete("cards", where="card_id = ?", params=["c1"]))
-    assert st["matched"] == 1
+    assert st.matched == 1
 
     # hidden from the normal read path
     (c,) = await db.query("SELECT count(*) AS c FROM cards")
@@ -19,7 +19,7 @@ async def test_delete_is_a_tombstone(db):
 
     # re-deleting matches nothing: the row is already a tombstone, not re-live
     st2 = await db.wait(await db.delete("cards", where="card_id = ?", params=["c1"]))
-    assert st2["matched"] == 0
+    assert st2.matched == 0
 
 
 async def test_port_has_no_update_path(db):

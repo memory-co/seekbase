@@ -10,16 +10,15 @@ from __future__ import annotations
 from ._types import (
     Embedder,
     EmbedderInvalid,
-    Hit,
     NotFound,
     QueryError,
     ReadOnlyError,
-    Row,
     SchemaError,
     SeekbaseError,
     SeekbaseUnavailable,
 )
 from .port import Seekbase
+from .struct import Hit, Request, Row, Ticket
 
 __version__ = "0.0.1"
 
@@ -28,6 +27,8 @@ __all__ = [
     "Embedder",
     "Row",
     "Hit",
+    "Ticket",
+    "Request",
     "SeekbaseError",
     "SeekbaseUnavailable",
     "SchemaError",

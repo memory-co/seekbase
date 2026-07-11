@@ -44,7 +44,7 @@ async def test_live_embedder_semantic_search(tmp_path):
             {"id": "c2", "issue": "redis vs a local in-process cache for hot keys"},
             {"id": "c3", "issue": "debugging a segfault in C with gdb backtraces"},
         ]))
-        assert st["state"] == "done"
+        assert st.state == "done"
 
         # a query semantically close to c1 (never lexically identical)
         hits = await db.query(

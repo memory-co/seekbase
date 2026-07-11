@@ -9,7 +9,7 @@ from ._route import Endpoint
 
 
 async def handle(db, body: dict, params: dict) -> tuple[int, dict]:
-    return 200, db.services.tickets.status(params["ticket"])
+    return 200, db.services.tickets.status(params["ticket"]).to_wire()
 
 
 ENDPOINT = Endpoint("GET", "/v1/writes/{ticket}", handle)

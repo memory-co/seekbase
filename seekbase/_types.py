@@ -1,15 +1,12 @@
-"""seekbase value types, the Embedder port, and the error hierarchy.
+"""The Embedder port and the error hierarchy.
 
-Plain carriers — no business meaning (no card/round/session) lives here.
-Rows and hits are plain dicts.
+The data objects (Row/Hit/Ticket/Request/Schema…) live in ``struct/``; this
+module holds the injection *contract* (Embedder) and the exception types — the
+behavioral surface, not data. No business meaning lives here.
 """
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
-
-# A row is a plain dict; a Hit is a Row plus a "_score" float key.
-Row = dict[str, Any]
-Hit = dict[str, Any]
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable

@@ -10,7 +10,8 @@ from ._route import Endpoint
 
 
 async def handle(db, body: dict, params: dict) -> tuple[int, dict]:
-    return 200, await db.services.write.insert(body.get("table"), body.get("rows") or [])
+    ticket = await db.services.write.insert(body.get("table"), body.get("rows") or [])
+    return 200, ticket.to_wire()
 
 
 ENDPOINT = Endpoint("POST", "/v1/insert", handle)

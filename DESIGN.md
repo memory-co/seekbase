@@ -73,9 +73,9 @@ seekbase/                      # 仓库根
   DESIGN.md                    # 本文
   seekbase/                    # 包(flat,不用 src/)
     __init__.py                # 对外导出:Seekbase + 值类型 + 协议 + 错误
-    _types.py                  # Row/Hit、Embedder 协议、错误层级 —— 纯值类型
+    _types.py                  # Embedder 协议 + 错误层级 —— 行为契约(数据对象都在 struct/)
     port.py                    # Seekbase(async 门面:open/connect/query/insert/delete/wait/…)
-    schema.py                  # SCHEMA 解析/校验 → 内部 TableSpec(columns/primary/searchable)
+    schema.py                  # SCHEMA 解析/校验 + 类型映射(结构体在 struct/schema.py,这里只 parse)
     server.py                  # 手写 ASGI 壳:auth + 收发 + 错误映射 → 派给 api/(seekbase_server / serve)
     api/                       # HTTP API 面:一类接口一个文件(目录即接口清单,对齐 docs/api/*.md)
       _route.py                #   Endpoint 数据类 + 无框架路径匹配(含 {param})
@@ -91,9 +91,13 @@ seekbase/                      # 仓库根
       write.py                 #   WriteService —— insert/delete:校验→embed→files-first→DuckDB
       admin.py                 #   AdminService —— rebuild:replay 文件镜像→重灌 DuckDB
       __init__.py              #   Services 装配(build_services 从引擎注入)
+    struct/                    # 所有层间数据对象定义(frozen dataclass / 别名,无行为)
+      request.py               #   Request —— 传输中立的 op 单元(port → executor)
+      ticket.py                #   Ticket —— 写回执(service → port / wire;to_wire/from_wire)
+      schema.py                #   Column / TableSpec / Schema + ds/… 元列常量(parse 在 ../schema.py)
+      row.py                   #   Row / Hit —— 查询结果 dict 形态
     _engine/                   # 机制层:只提供原语,不做编排
-      plan.py                  # Predicate / Plan / Request —— 传输中立的查询原语  [M1 已落]
-      executor.py              # LocalExecutor(dispatch Request→service + ticket)/ HttpExecutor(→HTTP)
+      executor.py              # LocalExecutor(dispatch Request→service)/ HttpExecutor(→HTTP,回 Ticket)
       duck.py                  # DuckdbEngine:纯 DuckDB 原语——建表/可见性视图/existing_keys/commit_rows/soft_delete/run_query
       search.py                # SearchEngine:业务表上的 vss(HNSW)+ fts(BM25),embed/tok/hybrid/rebuild_fts
       rewrite.py               # search() 的 SQL 改写:extract_searches / search_target(纯函数)

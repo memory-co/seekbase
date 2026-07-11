@@ -32,7 +32,7 @@ async def test_open_write_read_delete_read(tmp_path):
 
         # 4) 删一行(打墓碑)
         st = await db.wait(await db.delete("notes", where="id = ?", params=["n1"]))
-        assert st["matched"] == 1
+        assert st.matched == 1
 
         # 5) 再查 —— 删掉的看不见了
         rows = await db.query("SELECT id, text FROM notes ORDER BY id")

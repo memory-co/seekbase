@@ -1,20 +1,34 @@
-"""Declarative SCHEMA → internal Schema/TableSpec.
+"""Declarative SCHEMA → ``struct.Schema`` (parse + validate + type mapping).
 
 A SCHEMA is an **ordered list** of table specs (table-creation order = list
 order); each spec is ``{"table": name, "columns": [{"name","type"}, ...],
 "primary": col, "searchable": [...]}``. Design: docs/works/schema.md.
 
-Engine-managed metadata columns — ``ds`` / ``created_at`` / ``deleted_ds`` /
-``deleted_at`` — are auto-added to every table (the time machine, DESIGN §6.5);
-callers must not declare them. There is no ``files`` field: every table is
-mirrored automatically (design; the mirror lands in M2).
+The data objects (``Column`` / ``TableSpec`` / ``Schema`` + the ds/… metadata
+columns) live in ``struct/`` and are re-exported here; this module only parses
+raw input and resolves each column's DuckDB ``sql_type``. Engine-managed
+metadata columns must not be declared by callers.
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 
 from ._types import SchemaError
+from .struct import (
+    CREATED_AT,
+    DELETED_AT,
+    DELETED_DS,
+    DS,
+    META_COLUMNS,
+    Column,
+    Schema,
+    TableSpec,
+)
+
+__all__ = [
+    "parse_schema", "Column", "TableSpec", "Schema",
+    "DS", "CREATED_AT", "DELETED_DS", "DELETED_AT", "META_COLUMNS",
+]
 
 # scalar declared type -> DuckDB type
 _SCALAR_SQL = {
@@ -29,13 +43,6 @@ _DECIMAL_RE = re.compile(r"^decimal\((\d+),(\d+)\)$")
 
 # types allowed as a primary key
 _PRIMARY_OK = {"str", "int"}
-
-# engine-managed metadata columns (VARCHAR: ISO / YYYYMMDD strings, grep-friendly)
-DS = "ds"
-CREATED_AT = "created_at"
-DELETED_DS = "deleted_ds"
-DELETED_AT = "deleted_at"
-META_COLUMNS = (DS, CREATED_AT, DELETED_DS, DELETED_AT)
 _RESERVED = set(META_COLUMNS)
 
 
@@ -54,50 +61,6 @@ def _sql_type(decl: str) -> str:
     )
 
 
-@dataclass(frozen=True)
-class Column:
-    name: str
-    type: str          # canonical declared type string
-
-    @property
-    def sql_type(self) -> str:
-        return _sql_type(self.type)
-
-
-@dataclass(frozen=True)
-class TableSpec:
-    name: str
-    columns: tuple[Column, ...]          # declared columns, in order (no metadata)
-    primary_key: str
-    searchable: tuple[str, ...] = ()
-
-    @property
-    def column_names(self) -> list[str]:
-        return [c.name for c in self.columns]
-
-    @property
-    def all_column_names(self) -> list[str]:
-        return [*self.column_names, *META_COLUMNS]
-
-    def is_column(self, name: str) -> bool:
-        return name in self.column_names or name in _RESERVED
-
-
-@dataclass(frozen=True)
-class Schema:
-    tables: tuple[TableSpec, ...] = ()    # ordered
-
-    def table(self, name: str) -> TableSpec:
-        for t in self.tables:
-            if t.name == name:
-                return t
-        raise SchemaError(f"unknown table {name!r}")
-
-    @property
-    def table_names(self) -> list[str]:
-        return [t.name for t in self.tables]
-
-
 def _parse_columns(table: str, raw) -> tuple[Column, ...]:
     if not isinstance(raw, list) or not raw:
         raise SchemaError(f"{table}.columns: must be a non-empty list of {{name, type}}")
@@ -114,8 +77,7 @@ def _parse_columns(table: str, raw) -> tuple[Column, ...]:
         if name in seen:
             raise SchemaError(f"{table}: duplicate column {name!r}")
         seen.add(name)
-        _sql_type(entry["type"])  # validate type now
-        cols.append(Column(name=name, type=entry["type"]))
+        cols.append(Column(name=name, type=entry["type"], sql_type=_sql_type(entry["type"])))
     return tuple(cols)
 
 

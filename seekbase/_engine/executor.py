@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from .._types import QueryError
+from ..struct import Ticket
 from .bridge import Bridge
 
 
@@ -65,21 +66,24 @@ class HttpExecutor:
     def ready(self) -> bool:
         return True
 
-    async def execute(self, req: Request) -> Any:
+    async def execute(self, req) -> Any:
+        # ticket ops return a Ticket (reconstructed from the JSON), so the port
+        # sees the same type as it does locally; query returns {"rows": …}.
         op = req.op
         if op == "query":
             return await self._post("/v1/query", {
                 "sql": req.sql, "params": list(req.params),
                 "ds_start": req.ds_start, "ds_end": req.ds_end})
         if op == "insert":
-            return await self._post("/v1/insert", {"table": req.table, "rows": list(req.rows)})
+            return Ticket.from_wire(
+                await self._post("/v1/insert", {"table": req.table, "rows": list(req.rows)}))
         if op == "delete":
-            return await self._post("/v1/delete", {
-                "table": req.table, "where": req.where, "params": list(req.params)})
+            return Ticket.from_wire(await self._post("/v1/delete", {
+                "table": req.table, "where": req.where, "params": list(req.params)}))
         if op == "status":
-            return await self._get(f"/v1/writes/{req.ticket}")
+            return Ticket.from_wire(await self._get(f"/v1/writes/{req.ticket}"))
         if op == "rebuild":
-            return await self._post("/v1/rebuild", {})
+            return Ticket.from_wire(await self._post("/v1/rebuild", {}))
         raise QueryError(f"unknown op {op!r}")
 
     async def _post(self, path: str, body: dict) -> Any:
