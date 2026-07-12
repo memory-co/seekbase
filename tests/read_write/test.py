@@ -39,6 +39,20 @@ async def test_concurrent_inserts_batch_and_all_land(db):
     assert c["c"] == 10                      # every concurrent write is durable + visible
 
 
+async def test_reads_run_concurrently_with_writes(db):
+    """Reads run on the ReadPool (cursors, MVCC) — concurrent with the single
+    write worker. Interleaved reads/writes don't error; each read sees a valid
+    snapshot and all writes converge."""
+    results = await asyncio.gather(*(
+        [db.insert("cards", {"card_id": f"c{i}", "issue": "x", "kind": "k", "n": i})
+         for i in range(15)]
+        + [db.query("SELECT count(*) AS c FROM cards") for _ in range(15)]))
+    reads = [r for r in results if isinstance(r, list)]
+    assert all(r[0]["c"] <= 15 for r in reads)       # every read saw a valid snapshot
+    (final,) = await db.query("SELECT count(*) AS c FROM cards")
+    assert final["c"] == 15                          # all writes landed
+
+
 async def test_reinsert_same_key_errors(db):
     """Primary keys are write-once: re-inserting an existing key is rejected
     at the (funnelled) write path; the original row is untouched."""

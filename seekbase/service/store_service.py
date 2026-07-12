@@ -23,7 +23,7 @@ from typing import Any
 import duckdb
 
 from .._types import QueryError, ReadOnlyError
-from ..runtime import Bridge
+from ..runtime import Bridge, ReadPool
 from ..struct import CREATED_AT, DELETED_AT, DELETED_DS, DS, Schema, TableSpec
 
 __all__ = ["StoreService"]
@@ -65,10 +65,11 @@ def _one_statement(sql: str, label: str) -> str:
 
 class StoreService:
     def __init__(self, bridge: Bridge, conn, schema: Schema, dim: int | None) -> None:
-        self._bridge = bridge
+        self._bridge = bridge          # single-writer: all writes serialize here
         self._conn = conn
         self._schema = schema
         self._dim = dim               # embedding dim, or None if nothing searchable
+        self._reads: ReadPool | None = None   # concurrent reads (cursors), off the write bridge
 
     @classmethod
     async def open(
@@ -80,6 +81,7 @@ class StoreService:
         await bridge.run(engine._create_tables)
         if dim is not None:
             await bridge.run(engine._setup_search)   # vss + fts extensions + indexes
+        engine._reads = await ReadPool.create(bridge, conn)   # read cursors off the write bridge
         return engine
 
     @property
@@ -176,7 +178,7 @@ class StoreService:
         return f"SELECT {cols} FROM {_phys(spec.name)} WHERE {' AND '.join(conds)}"
 
     def _install_views(
-        self, ds_start: str | None, ds_end: str | None, searches: list | None = None
+        self, conn, ds_start: str | None, ds_end: str | None, searches: list | None = None
     ) -> None:
         searches = searches or []
         by_table: dict[str, list[tuple[str, str]]] = {}
@@ -200,9 +202,9 @@ class StoreService:
                 body = f"SELECT base.*, {', '.join(scores)} FROM ({base}) base {' '.join(joins)}"
             else:
                 body = base
-            self._conn.execute(f"CREATE OR REPLACE TEMP VIEW {_ident(spec.name)} AS {body}")
+            conn.execute(f"CREATE OR REPLACE TEMP VIEW {_ident(spec.name)} AS {body}")
 
-    # ─── read ──────────────────────────────────────────────────────────
+    # ─── read (on the ReadPool: a cursor, concurrent, off the write bridge) ─
 
     async def run_query(
         self,
@@ -215,9 +217,9 @@ class StoreService:
         _check_ds("ds_start", ds_start)
         _check_ds("ds_end", ds_end)
 
-        def _do() -> list[dict]:
+        def _do(conn) -> list[dict]:            # conn = a borrowed read cursor
             try:
-                stmts = self._conn.extract_statements(sql)
+                stmts = conn.extract_statements(sql)
             except duckdb.Error as e:
                 raise QueryError(str(e)) from e
             if len(stmts) != 1:
@@ -228,21 +230,21 @@ class StoreService:
                 view_searches = []
                 for i, (table, name, results) in enumerate(searches or []):
                     tmp = f"_sb_s_{i}"
-                    self._conn.execute(
+                    conn.execute(
                         f"CREATE OR REPLACE TEMP TABLE {_ident(tmp)} (pk VARCHAR, score DOUBLE)")
                     if results:
-                        self._conn.executemany(
+                        conn.executemany(
                             f"INSERT INTO {_ident(tmp)} VALUES (?, ?)",
                             [[p, sc] for p, sc in results])
                     view_searches.append((table, name, tmp))
-                self._install_views(ds_start, ds_end, view_searches)
-                cur = self._conn.execute(sql, list(params))
+                self._install_views(conn, ds_start, ds_end, view_searches)
+                cur = conn.execute(sql, list(params))
                 names = [d[0] for d in cur.description]
                 return [dict(zip(names, row)) for row in cur.fetchall()]
             except duckdb.Error as e:
                 raise QueryError(str(e)) from e
 
-        return await self._bridge.run(_do)
+        return await self._reads.run(_do)
 
     # ─── write primitives (orchestrated by write_service / admin_service) ─
 
@@ -326,7 +328,7 @@ class StoreService:
 
         def _do() -> list:
             try:
-                self._install_views(None, None, None)   # current live state
+                self._install_views(self._conn, None, None, None)   # current live state
                 cur = self._conn.execute(
                     f"SELECT {_ident(pk)} FROM {_ident(table)} WHERE ({stmt})", list(params))
                 return [r[0] for r in cur.fetchall()]
@@ -349,4 +351,6 @@ class StoreService:
         await self._bridge.run(lambda: self._conn.execute(f"DELETE FROM {_phys(table)}"))
 
     async def close(self) -> None:
+        if self._reads is not None:
+            self._reads.close()                  # stop read threads (+ their cursors)
         await self._bridge.run(self._conn.close)
