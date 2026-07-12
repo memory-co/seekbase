@@ -31,6 +31,9 @@ __all__ = ["StoreService"]
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DS_RE = re.compile(r"^\d{8}$")
 _SEARCH_K = 100          # candidates per arm (vss / fts) before RRF
+_OVERFETCH = 4           # as-of search: widen the arm's candidate pool so post-
+#                          filtering the ds/deleted horizon still yields ~k live
+#                          rows (HNSW/BM25 filter *after* top-k → under-returns).
 
 
 def veccol(col: str) -> str:
@@ -49,6 +52,22 @@ def _ident(name: str) -> str:
 
 def _phys(name: str) -> str:
     return _ident(f"_sb_{name}")
+
+
+def _asof_conds(ds_start: str | None, ds_end: str | None) -> list[str]:
+    """The visibility predicate (time machine = ds filter), shared by the
+    structured read view (``_visible``) and search candidate generation
+    (``hybrid``) so query and search agree on "what's alive as-of D".
+    ``ds_end`` None → current live state; set → as-of that day."""
+    conds: list[str] = []
+    if ds_end is None:
+        conds.append(f"{_ident(DELETED_DS)} IS NULL")            # current live state
+    else:                                                        # as-of ds_end
+        conds.append(f"{_ident(DS)} <= '{ds_end}'")
+        conds.append(f"({_ident(DELETED_DS)} IS NULL OR {_ident(DELETED_DS)} > '{ds_end}')")
+    if ds_start is not None:
+        conds.append(f"{_ident(DS)} >= '{ds_start}'")
+    return conds
 
 
 def _check_ds(label: str, value: str | None) -> None:
@@ -135,24 +154,33 @@ class StoreService:
             self._build_fts(spec)
 
     async def hybrid(self, table: str, col: str, qvec: list[float], qtok: str,
-                     k: int = _SEARCH_K) -> list[tuple[str, float]]:
+                     k: int = _SEARCH_K, ds_start: str | None = None,
+                     ds_end: str | None = None) -> list[tuple[str, float]]:
         """Fuse vss (cosine ANN over ``qvec``) + fts (BM25 over ``qtok``) by RRF
         (k0=60) on the given column. The query vector/tokens are precomputed by
-        EmbeddingService; this is pure DuckDB."""
+        EmbeddingService; this is pure DuckDB.
+
+        Both arms filter by the *same* as-of predicate as the structured read
+        (``_asof_conds``), so search and query agree on what's alive as-of D. The
+        HNSW/BM25 filter is applied *after* each arm's top-k, so a live-as-of-D
+        row can be crowded out by now-live-but-not-then rows; on the historical
+        path the candidate pool is widened ``_OVERFETCH``× to counter that."""
         spec = self._schema.table(table)
         phys = f"_sb_{table}"
         pk = spec.primary_key
         f = f"fts_main_{phys}"
         vc, tc = veccol(col), tokcol(col)
+        vis = " AND ".join(_asof_conds(ds_start, ds_end))
+        cand = k * _OVERFETCH if ds_end is not None else k       # now-path unchanged
         sql = (
             f'WITH v AS (SELECT pk, row_number() OVER (ORDER BY dd) rk FROM '
             f'(SELECT "{pk}" pk, array_cosine_distance("{vc}", ?::FLOAT[{self._dim}]) dd '
-            f'FROM "{phys}" WHERE "{vc}" IS NOT NULL AND "deleted_ds" IS NULL '
-            f'ORDER BY dd LIMIT {k})), '
+            f'FROM "{phys}" WHERE "{vc}" IS NOT NULL AND {vis} '
+            f'ORDER BY dd LIMIT {cand})), '
             f"ff AS (SELECT pk, row_number() OVER (ORDER BY sc DESC) rk FROM "
             f"(SELECT \"{pk}\" pk, {f}.match_bm25(\"{pk}\", ?, fields := '{tc}') sc "
             f'FROM "{phys}" WHERE {f}.match_bm25("{pk}", ?, fields := \'{tc}\') IS NOT NULL '
-            f'AND "deleted_ds" IS NULL ORDER BY sc DESC LIMIT {k})) '
+            f'AND {vis} ORDER BY sc DESC LIMIT {cand})) '
             f"SELECT COALESCE(v.pk, ff.pk) pk, "
             f"COALESCE(1.0/(60+v.rk),0)+COALESCE(1.0/(60+ff.rk),0) score "
             f"FROM v FULL OUTER JOIN ff ON v.pk=ff.pk ORDER BY score DESC LIMIT {k}")
@@ -167,14 +195,7 @@ class StoreService:
 
     def _visible(self, spec: TableSpec, ds_start: str | None, ds_end: str | None) -> str:
         cols = ", ".join(_ident(c) for c in spec.all_column_names)   # business + meta only
-        conds: list[str] = []
-        if ds_end is None:
-            conds.append(f"{_ident(DELETED_DS)} IS NULL")            # current live state
-        else:                                                        # as-of ds_end
-            conds.append(f"{_ident(DS)} <= '{ds_end}'")
-            conds.append(f"({_ident(DELETED_DS)} IS NULL OR {_ident(DELETED_DS)} > '{ds_end}')")
-        if ds_start is not None:
-            conds.append(f"{_ident(DS)} >= '{ds_start}'")
+        conds = _asof_conds(ds_start, ds_end)
         return f"SELECT {cols} FROM {_phys(spec.name)} WHERE {' AND '.join(conds)}"
 
     def _install_views(

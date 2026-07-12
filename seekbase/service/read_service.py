@@ -76,7 +76,8 @@ class ReadService:
                 target = _search_target(self._schema, sql, col)
                 qvec = (await self._embedding.embed([text]))[0]
                 results = await self._store.hybrid(
-                    target, col, qvec, self._embedding.tok(text), _SEARCH_K)
+                    target, col, qvec, self._embedding.tok(text), _SEARCH_K,
+                    ds_start=ds_start, ds_end=ds_end)
                 searches.append((target, name, results))
         rows = await self._store.run_query(rewritten, list(params), ds_start, ds_end, searches)
         return {"rows": rows}

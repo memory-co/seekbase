@@ -6,8 +6,12 @@
 
 ## 场景一览
 
+> 组织上有意混了几把尺子(功能子系统 / 端到端旅程 / 横切契约 / 传输形态),
+> `journey/` 是把典型正路径连起来的**大巡游**,其余目录做各自的边界与负路径细测。
+
 | 目录 | 测什么 |
 |---|---|
+| [`journey/`](journey/) | 一条端到端主线(本地、无 HTTP):建库 → 混合当前/历史 ds 批量写 30 条中文数据 → 结构化查询 → 中文 `search()` → 时光机回溯 → 软删可见性 → 重开持久化 → `rebuild` → 写一次性,典型功能连成一个故事走一遍 |
 | [`quickstart/`](quickstart/) | 最基础的本地用法(端到端):开库 → 写 → 查 → 删 → 再查,不起 server、不需 embedder;含关库重开数据仍在 |
 | [`read_write/`](read_write/) | SQL `query` 读 + 同步 `insert`/`delete`(ticket)round-trip:批量、参数化、`count`、重复主键报错 |
 | [`file_mirror/`](file_mirror/) | canonical 文件镜像:写落 `ds=…/<表>.jsonl`、删是 append 墓碑、`rebuild` 从文件重灌恢复精确状态 |

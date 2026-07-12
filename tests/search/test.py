@@ -156,6 +156,40 @@ async def test_search_respects_time_window(db):
     assert await db.query("SELECT card_id FROM cards WHERE search(issue, 'pty tmux')", ds_end="20000101") == []
 
 
+async def test_search_time_travels_over_deleted_rows(tmp_path, monkeypatch):
+    """search() shares the structured read's as-of predicate: a row deleted
+    *now* is still searchable when the query time-travels to before its
+    deletion (and a not-yet-created row stays invisible). The vss/fts index
+    keeps soft-deleted rows; only the ds/deleted horizon filters them."""
+    import seekbase.service.write_service as ws
+
+    def _freeze(ds):
+        monkeypatch.setattr(ws, "today", lambda: ds)
+        monkeypatch.setattr(ws, "now", lambda: ds + "T12:00:00+00:00")
+
+    db = await open_db(tmp_path, schema=[{
+        "table": "notes",
+        "columns": [{"name": "id", "type": "str"}, {"name": "body", "type": "str"}],
+        "primary": "id", "searchable": ["body"]}])
+    try:
+        _freeze("20260102")
+        await db.wait(await db.insert("notes", {"id": "n1", "body": "缓存淘汰策略 LRU 与 LFU"}))
+        _freeze("20260105")
+        await db.wait(await db.delete("notes", where="id = ?", params=["n1"]))
+
+        # as-of now: deleted, not searchable
+        assert await db.query("SELECT id FROM notes WHERE search(body, '缓存淘汰')") == []
+        # as-of day03 (created@02, deleted@05): alive → searchable
+        past = await db.query(
+            "SELECT id FROM notes WHERE search(body, '缓存淘汰')", ds_end="20260103")
+        assert [r["id"] for r in past] == ["n1"]
+        # as-of day01 (before creation): invisible
+        assert await db.query(
+            "SELECT id FROM notes WHERE search(body, '缓存淘汰')", ds_end="20260101") == []
+    finally:
+        await db.close()
+
+
 async def test_search_needs_a_searchable_column(tmp_path):
     schema = [{"table": "notes",
                "columns": [{"name": "id", "type": "str"}, {"name": "text", "type": "str"}],
