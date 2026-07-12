@@ -7,13 +7,13 @@
 
   use-case services (thin orchestrators: order + policy only)
     read_service.py     ReadService    — read: rewrite → embed → store.hybrid → store query
-    write_service.py    WriteService   — insert / delete: validate → embed → files → store
+    write_service.py    WriteService   — insert / delete via one worker; owns the ticket log
     admin_service.py    AdminService   — rebuild: replay the file mirror into the store
-    ticket_service.py   TicketService  — write tickets (issue on write, look up on status)
 
+The **ticket** concept lives inside WriteService (issue / status / append are its
+methods — no standalone TicketService); admin issues its rebuild ticket via it.
 ``build_services`` wires the use-case services onto the domain ones; ``Services``
-bundles them. The local execution seam (LocalExecutor) lives in ``client.py``;
-the HTTP one in ``api/remote.py``.
+bundles them. The local execution seam (LocalExecutor) lives in ``client.py``.
 """
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ from .embedding_service import EmbeddingService
 from .file_service import FileService
 from .read_service import ReadService
 from .store_service import StoreService
-from .ticket_service import TicketService
 from .write_service import WriteService
 
 
@@ -33,21 +32,19 @@ class Services:
     read: ReadService
     write: WriteService
     admin: AdminService
-    tickets: TicketService
 
 
-def build_services(store, embedding, files, schema) -> Services:
-    tickets = TicketService()
+def build_services(store, embedding, files, schema, bridge, tickets_dir) -> Services:
+    write = WriteService(store, embedding, files, schema, bridge, tickets_dir)
     return Services(
         read=ReadService(store, embedding, schema),
-        write=WriteService(store, embedding, files, schema, tickets),
-        admin=AdminService(store, embedding, files, schema, tickets),
-        tickets=tickets,
+        write=write,
+        admin=AdminService(store, embedding, files, schema, write),   # rebuild → write.issue
     )
 
 
 __all__ = [
     "Services", "build_services",
     "StoreService", "EmbeddingService", "FileService",
-    "ReadService", "WriteService", "AdminService", "TicketService",
+    "ReadService", "WriteService", "AdminService",
 ]

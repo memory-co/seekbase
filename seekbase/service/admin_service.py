@@ -11,12 +11,12 @@ from ..struct import CREATED_AT, DELETED_AT, DS
 
 
 class AdminService:
-    def __init__(self, store, embedding, files, schema, tickets) -> None:
+    def __init__(self, store, embedding, files, schema, write) -> None:
         self._store = store
         self._embedding = embedding
         self._files = files
         self._schema = schema
-        self._tickets = tickets
+        self._write = write               # rebuild's ticket is issued/logged via WriteService
 
     async def rebuild(self) -> dict:
         result = {"tables": 0, "rows": 0, "tombstones": 0}
@@ -57,4 +57,4 @@ class AdminService:
                 await self._store.soft_delete(spec.name, [pk_val], dds, dat)
                 result["tombstones"] += 1
             await self._store.rebuild_fts(spec.name)
-        return self._tickets.issue("rebuild", stats=result)
+        return await self._write.issue("rebuild", stats=result)

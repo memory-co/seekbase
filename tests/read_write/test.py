@@ -69,6 +69,22 @@ async def test_insert_ticket_settles_done(db):
     assert st.id == ticket and st.state == "done"
 
 
+async def test_ticket_status_survives_reopen(tmp_path):
+    """Tickets are a durable, ds-partitioned JSONL log — a ticket's status is
+    still resolvable after the db is closed and reopened on the same data dir."""
+    d = await open_db(tmp_path)
+    ticket = await d.insert("cards", {"card_id": "c1", "issue": "x", "kind": "k", "n": 1})
+    await d.wait(ticket)
+    await d.close()
+
+    d2 = await open_db(tmp_path)
+    try:
+        st = await d2.write_status(ticket)
+        assert st.id == ticket and st.state == "done"
+    finally:
+        await d2.close()
+
+
 async def test_context_manager(tmp_path):
     async with await open_db(tmp_path) as db:
         await db.wait(await db.insert("cards", {"card_id": "c1", "issue": "x", "kind": "k", "n": 1}))

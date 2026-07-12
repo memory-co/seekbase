@@ -49,7 +49,7 @@ class LocalExecutor:
         if op == "delete":
             return await self._svc.write.delete(req.table, req.where, list(req.params))
         if op == "status":
-            return self._svc.tickets.status(req.ticket)
+            return await self._svc.write.status(req.ticket)
         if op == "rebuild":
             return await self._svc.admin.rebuild()
         raise QueryError(f"unknown op {op!r}")
@@ -70,7 +70,7 @@ class Seekbase:
 
     @property
     def services(self):
-        """The in-process service layer (query/write/admin/tickets). Present for
+        """The in-process service layer (read/write/admin). Present for
         an embedded ``open``ed db; ``None`` for a remote ``connect``. The HTTP
         server (which always wraps an embedded db) calls these directly."""
         return self._services
@@ -98,7 +98,7 @@ class Seekbase:
         dim = embedding.dim if embedding is not None else None
         store = await StoreService.open(data_dir, parsed, bridge, dim=dim)
         files = FileService(bridge, data_dir / "files")
-        services = build_services(store, embedding, files, parsed)
+        services = build_services(store, embedding, files, parsed, bridge, data_dir / "tickets")
         executor = LocalExecutor(services, store, bridge)
         await executor.start()
         return cls(executor, services)
