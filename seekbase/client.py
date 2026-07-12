@@ -34,7 +34,7 @@ class LocalExecutor:
         self._bridge = bridge
 
     async def start(self) -> None:
-        return None                      # writes are synchronous — nothing to spin up
+        await self._svc.write.start()    # launch the write worker (drains the queue)
 
     @property
     def ready(self) -> bool:
@@ -55,6 +55,7 @@ class LocalExecutor:
         raise QueryError(f"unknown op {op!r}")
 
     async def close(self) -> None:
+        await self._svc.write.close()    # stop the write worker (drain + join)
         await self._store.close()        # closes the single DuckDB connection (vss+fts)
         self._bridge.close()
 

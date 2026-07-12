@@ -1,6 +1,8 @@
 """read_write — SQL 读 + 异步写 round-trip 场景. See README.md."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from seekbase import QueryError
@@ -24,6 +26,17 @@ async def test_batch_filters_order_limit(db):
     assert [r["n"] for r in rows] == [4, 3]
     (c,) = await db.query("SELECT count(*) AS c FROM cards WHERE card_id IN ('c0','c1')")
     assert c["c"] == 2
+
+
+async def test_concurrent_inserts_batch_and_all_land(db):
+    """All writes funnel through the single write worker; concurrent inserts are
+    drained as a batch and every one lands (read-your-write holds right after)."""
+    tickets = await asyncio.gather(*[
+        db.insert("cards", {"card_id": f"c{i}", "issue": f"i{i}", "kind": "k", "n": i})
+        for i in range(10)])
+    assert len(tickets) == 10 and all(t for t in tickets)
+    (c,) = await db.query("SELECT count(*) AS c FROM cards")
+    assert c["c"] == 10                      # every concurrent write is durable + visible
 
 
 async def test_reinsert_same_key_errors(db):
