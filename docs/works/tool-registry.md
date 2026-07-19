@@ -1,0 +1,161 @@
+# tool-registry — 万物皆工具:注册机制 + 权限范围(Claude / Codex 式)
+
+> 状态:**设计稿(pipeline 方向,未落)**。管道里每一段的 verb(`search` / `grep` / `find` / `sed` / `sh` / `http` / `embed` …)都是一个**注册工具**。**`search` 不特殊——它只是一个注册工具、一条最佳实践**;`find`/`sed`/`grep` 是另外几条最佳实践,和 `search` 平级地注册进同一张表。本文定两件事:① 工具怎么注册(契约 + registry);② 工具的**使用范围怎么限**——像 Claude Code / Codex 那样按**能力(capability)+ 策略(policy)**授权,给 pipeline-as-anything §9「tool 段是安全洞」一个正式的围栏。
+>
+> 依赖:[pipeline-as-anything.md](pipeline-as-anything.md)(管道模型、`_in` 表 ABI、§2.1「接缝才切」、§9 的安全担忧)。
+
+## 1. 定位:`search` 只是众多注册工具之一
+
+pipeline-as-anything 把 query 拆成 `stage | stage`,每段吃一张表、吐一张表。**每个 stage 的 verb 都由 registry 解析成一个工具**——`search` 也不例外。它在旧设计里是「一等算子」,在这里**降级成一条最佳实践**:一个 `kind=source`、产 `(pk,_score,…)` 表的注册工具。
+
+```
+                         Tool Registry(一张表)
+   ┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+  search      scan       grep       find       sed        sh / http
+ (source)   (source)   (tool)     (tool)     (tool)     (tool)
+ 向量检索    读业务表    行过滤     列文件      流编辑     shell / 网络
+   └──────── 都实现同一个「表进表出」契约,都受同一套权限策略约束 ────────┘
+```
+
+- **没有特权工具**:`search` 和 `grep` 在 registry 里是同一种公民,靠 `kind` + `caps`(§3)区分,不靠硬编码。想把检索换成别的召回策略?注册一个新 source 工具即可,不动编译器。
+- **最佳实践 = 一组预置工具**:seekbase 自带一批(§4);它们是「推荐这么用」的沉淀,不是语言内建。用户可注册自己的工具(§5)。
+
+## 2. 一次注册记录:工具的契约
+
+一个工具就是一条注册记录——**名字 + 类别 + 签名 + 能力 + handler**:
+
+```python
+Tool(
+    name   = "grep",
+    kind   = "tool",                    # source | transform | tool | sink(见 pipeline §2)
+    args   = "<pattern> [--field <col>]",
+    caps   = {Cap.PURE},                # 声明它碰什么外界资源(§3)——授权判据
+    handler= grep_over_table,           # (in_table, args, ctx) -> out_table
+)
+```
+
+- **签名 = 表进表出**:`source` 无表入、产表;`transform`/`tool`/`sink` 表入。类别决定它在管道里能放哪(source 只能打头,sink 只能收尾)。
+- **`caps` 是授权的唯一判据**:工具**必须诚实声明**自己碰哪些外界资源(读文件?写文件?联网?起子进程?)。策略层(§6)只看 `caps`,不猜 handler 干了啥——**声明不实 = 安全漏洞**,所以预置工具的 caps 是审过的,用户工具注册时也要显式写。
+- **handler 收 `ctx`**:上下文里带**已授的权限边界**(可读哪些路径、能否联网、沙箱句柄),handler 只能在边界内动手——纵深防御,不只靠编译期检查。
+
+## 3. 能力(capability):工具碰什么外界资源
+
+授权不按工具名逐个开,而按**能力**分级——这是 Claude Code「工具按类授权」、Codex「沙箱按资源限」的同一思路:
+
+| 能力 | 含义 | 例子工具 | 危险度 |
+|---|---|---|---|
+| `PURE` | 纯计算,只碰 `_in`,不碰外界 | `grep` `sed` `sort`(表内) | 无 |
+| `FS_READ` | 读文件系统(限定根) | `find` `read <file>` `grep <path>` | 低 |
+| `FS_WRITE` | 写文件系统 | `write <file>` `sed -i` | 中 |
+| `NET` | 联网 | `http` `embed`(API embedder) | 中 |
+| `EXEC` | 起**任意**子进程 | `sh '<任意命令>'` | **高** |
+
+- **一个工具可声明多能力**:`grep <path>` = `FS_READ`;纯表内 `grep` = `PURE`。同名工具按参数落到不同能力(handler 自报)。
+- **`EXEC` 是特殊的**:`sh` 能跑任意命令 = 把上面所有能力一次性放开,所以它单列最高危,默认最严(§6)。**能用专用工具就别用 `sh`**——`grep`/`find`/`sed` 存在的意义之一,就是把常见 shell 活收成 `PURE`/`FS_READ` 的窄能力工具,不必动用 `EXEC`。
+
+## 4. 预置的最佳实践工具(自带一批)
+
+seekbase 预置一批审过 caps 的工具。**`search` 只是其中一个**:
+
+| 工具 | kind | caps | 干什么 |
+|---|---|---|---|
+| `search <表> '文本'` | source | `PURE`(引擎内) | 向量+全文 hybrid 检索,产 `(pk,_score,…)`(见 [search.md](search.md)) |
+| `scan <表> [@asof]` | source | `PURE` | 读业务表的可见性视图(时光机入口,见 [time_machine.md](time_machine.md)) |
+| `read <file>` | source | `FS_READ` | 读文件成表(`read_json_auto`/csv) |
+| `grep <pat>` | tool | `PURE` / `FS_READ` | 按正则过滤 `_in` 的行,或 grep 文件成表 |
+| `find <expr>` | tool | `FS_READ` | 列文件成表(名字/大小/时间) |
+| `sed <script>` | tool | `PURE` | 对 `_in` 的文本列做流式改写 |
+| `http <url>` | tool | `NET` | 拿 `_in` 当参数打 HTTP,响应解析回表 |
+| `embed <col>` | tool | `NET` | 给 `_in` 某列补向量列 |
+| `sh '<cmd>'` | tool | `EXEC` | 逃生舱:任意 shell,`_in` 过 stdin、stdout 回表 |
+
+- **`search` vs `grep`/`find`**:都是召回/过滤的最佳实践,只是**检索维度不同**——`search` 是语义/BM25 召回,`grep` 是正则精确匹配,`find` 是文件系统枚举。管道里可以串:`find data/ -name '*.log' | grep 'ERROR' | search ... `——**每一段都是一个注册工具**。
+- **SQL 段不进 registry**:首 token 不命中工具名的段,就是一条原生 DuckDB SQL(over `_in`,pipeline §2.1)——它是**缺省**,不是「工具」。registry 只管 source/tool/sink 这些**首 token 命中、跳出 SQL** 的 verb。
+
+## 5. registry 怎么解析(编译期)
+
+管道解析(pipeline §6)时,每段只看**首 token**去 registry 查——**SQL 是缺省,命中才走工具**:
+
+```
+parse("search cards '…' | SELECT … | sh 'jq …'")
+  ├─ "search" → registry 命中 (source, PURE)      → 走 search 工具 ✓
+  ├─ "SELECT" → registry 未命中                    → 整段当 DuckDB SQL(缺省)
+  └─ "sh"     → registry 命中 (tool, EXEC)         → 走 sh 工具,caps 交策略层判(§6)
+```
+
+- **首 token 不命中 registry → 这段就是 SQL,不是错误**。SQL 是一等公民、也是 fallback(pipeline §6):registry 只在首 token 匹配工具名时才接管;`SELECT …`/`WITH …` 的引导关键字天然不在 registry 里,照走 DuckDB。**所以「未知工具」不存在**——不匹配即 SQL。
+- **命名不撞**:工具名不取 SQL 引导关键字(`select`/`with`/`from`…),从根上避免「本想写 SQL 却被当成工具」的歧义。
+- **内建 + 用户注册同一张表**:`open(..., tools=[MyTool(...)])` 把自定义工具挂进 registry;名字冲突显式报错(不覆盖内建)。用户工具**必须声明 caps**,进不了「审过」名单、默认按声明的 caps 受策略约束。
+
+## 6. 权限范围:能力 × 策略(Claude / Codex 式)
+
+**核心**:一段管道能不能跑某工具,不看工具名,看它的 `caps` 是否落在当前**策略(policy)**允许的范围内。策略借鉴两处成熟设计:
+
+- **Claude Code**:工具按类 **allow / ask / deny** 三态,权限模式(`default` / `acceptEdits` / `plan` / `bypassPermissions`)决定升级时问不问。
+- **Codex**:`EXEC` 类工具跑在**沙箱**里——限定可写目录、禁网、资源上限(approval modes:`read-only` / `workspace-write` / `danger-full-access`)。
+
+seekbase 的策略把这两套并起来:
+
+### 6.1 权限模式(一次 query / 一个 session 的默认范围)
+
+| 模式 | 允许的 caps | 语义 | 类比 |
+|---|---|---|---|
+| `read-only`(默认) | `PURE`, `FS_READ`, `NET`? | 只读:检索/过滤/读文件;**拒 `FS_WRITE`/`EXEC`** | Codex read-only / Claude plan |
+| `sandboxed` | 上 + `EXEC`(**在沙箱内**) | 允许 shell,但限定工作目录、禁网、资源上限 | Codex workspace-write |
+| `trusted` | 全部 | 显式开、放开一切(本机可信调用方) | Claude bypassPermissions |
+
+- **默认 `read-only`**:query 是数据接口,默认**不该**能写盘 / 起任意进程。`sh` 这类 `EXEC` 工具**默认不可用**——这就是 pipeline §9「tool 段 = RCE 风险」的正式答案:默认关,开要显式升级。
+- **`NET` 是可选项**:纯本地 memory 部署可以连 `NET` 一起关(`read-only` 去掉 `NET` → 连 `http`/`embed` 都禁),看部署面。
+
+### 6.2 三态决策(allow / ask / deny)+ 逐工具覆盖
+
+模式给的是**默认范围**,再叠一层显式覆盖(allowlist / denylist),按工具或按能力:
+
+```
+policy = {
+  mode: "read-only",
+  allow: ["search", "scan", "grep", "find"],   # 白名单:只这些能跑(更严)
+  deny:  ["sh"],                               # 黑名单:永不(即便升级)
+  ask:   ["http"],                             # 灰:每次问(交互式确认)
+}
+```
+
+- **决策顺序**:`deny` > `allow` > 模式默认。命中 `deny` → 直接 `PermissionDenied`(早失败,编译期就拒,管道不启动);命中 `ask` → 交互式确认(HTTP 形态下 = 一个待确认响应);否则按模式 caps 判。
+- **能力级 deny**:`deny_caps: [EXEC, FS_WRITE]` 一句话封掉所有该类工具,不用逐个列名——按类授权比按名授权更抗「新工具漏配」。
+
+### 6.3 沙箱:`EXEC` 工具的执行边界(纵深防御)
+
+即使策略放行了 `EXEC`(`sandboxed`/`trusted`),`sh` 的子进程仍在**沙箱**里跑,`ctx` 带着边界:
+
+- **文件系统**:只可读授予的根、只可写临时工作目录(Codex workspace 式);越界的路径访问在 handler 层就拒。
+- **网络**:`sandboxed` 默认禁网(除非工具另有 `NET` 授权)。
+- **资源**:CPU / 内存 / 墙钟上限,超时 kill——一段 `sh` 卡死不能拖垮整个 query 端口。
+- **为什么编译期检查还不够**:声明的 caps 可能不实、handler 可能有 bug——沙箱是**第二道墙**,把「工具越权」的爆炸半径限死在子进程里。
+
+## 7. 一次带工具的管道,权限怎么串起来
+
+```
+policy = read-only + allow[search,grep] + deny[sh]
+
+search cards 'pty 终端'        → registry:source PURE   → allow(在白名单) ✓
+  | SELECT * FROM _in WHERE …  → transform(原生 SQL)    → 不过 registry ✓
+  | grep 'ERROR' --field issue → registry:tool PURE     → allow(在白名单) ✓
+  | sh 'curl …'                → registry:tool EXEC      → DENY(命中 deny) ✗ 编译期拒,管道不启动
+```
+
+- 前三段通过:都是 `PURE`、都在白名单。第四段 `sh` 命中 `deny` → 整条管道**编译期就被拒**,一步都不执行(fail-closed)。
+- 换 `trusted` 模式且不 deny `sh` → 第四段放行,但 `curl` 仍在沙箱里(§6.3),禁网策略下照样连不出去。
+
+## 8. 诚实的代价 / 边界
+
+- **caps 声明的可信度是地基**:整套授权建立在「工具诚实声明 caps」上。预置工具审过;用户工具靠沙箱(§6.3)兜底,但一个声明成 `PURE` 却偷偷起进程的恶意工具,只有沙箱能拦——所以 `EXEC`/`FS_WRITE` 默认沙箱,不信声明。
+- **默认严 = 开箱少能力**:`read-only` 默认关掉 `sh`/写盘,很多「顺手串个脚本」的用法要显式升级模式。这是有意的——**数据接口默认不该是 RCE**;方便性用显式授权换,不用默认放开换。
+- **不是完整的多租户 ACL**:这里管的是「一次 query 能调哪些工具、工具能碰哪些资源」,**不**管「用户 A 能不能看表 T 的行」(那是行级授权,另一层,见 DESIGN 待定)。工具权限 ⊥ 数据权限。
+- **沙箱依赖平台**:资源上限 / 网络隔离的强度随 OS 能力变(cgroups / seccomp / 容器)。弱平台上沙箱退化成「尽力而为」,此时更该靠 `deny` 名单把 `EXEC` 直接关死。
+
+## 9. 与其他文档
+
+- [pipeline-as-anything.md](pipeline-as-anything.md):管道模型、`_in` 表 ABI、§2.1「接缝才切」、§9 tool 段安全担忧(本文是它的答案)。
+- [search.md](search.md):`search` 作为一个 source 工具(可插拔引擎),只是众多注册工具里的一个。
+- [time_machine.md](time_machine.md):`scan @asof` source 工具的 as-of 语义。
+- [architecture.md](architecture.md):`PipelineService` 编译期查 registry + 判策略的位置。

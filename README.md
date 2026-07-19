@@ -13,6 +13,8 @@
 
 > **状态:核心完整(单引擎 + 单表同步写)。** SQL `query`(结构化 + hybrid `search()` + `ds` 时间窗)、同步 ticket 写(`insert`/`delete`,**主键写一次、重复报错**)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、检索侧(**DuckDB `vss`+`fts` 就地长在业务表上,单引擎、无 LanceDB**)、两种使用形态,今天都能跑。**delete 只软删 `deleted_ds` 墓碑、历史永久保留,没有物理删/vacuum**。完整设计见 [DESIGN.md](DESIGN.md)。
 
+> **🚧 设计方向(下一代,未落):pipeline-as-anything。** query 正在朝一根 **SPL 式管道**演进——`stage | stage`,**SQL 是一等公民、也是缺省**(一段首 token 命中注册工具才走工具、否则整段是 SQL),检索退成一个 **source 段**、引擎**可插拔**(LanceDB / DuckDB-vss),`grep`/`find`/`sed`/`sh` 等都是**注册工具**、按 Claude/Codex 式**能力×策略**限权。下面示例是**现网已落**的 `search()` 形态;管道方向的完整设计见 [docs/works/pipeline-as-anything.md](docs/works/pipeline-as-anything.md) + [tool-registry.md](docs/works/tool-registry.md)。
+
 ## 安装
 
 ```bash
@@ -94,6 +96,6 @@ await db.close()
 
 - [DESIGN.md](DESIGN.md) —— 整体设计
 - [docs/api/](docs/api/) —— API 参考(query / insert / delete / admin / setup,每个接口的请求·响应·错误)
-- [docs/works/](docs/works/) —— 专题设计:[store.md](docs/works/store.md)(两层存储 files/DuckDB)、[search.md](docs/works/search.md)(vss+fts hybrid 检索)
+- [docs/works/](docs/works/) —— 专题设计。**架构主线(设计方向)**:[pipeline-as-anything.md](docs/works/pipeline-as-anything.md)(SPL 式管道 / SQL 一等公民 / 一切皆表)、[tool-registry.md](docs/works/tool-registry.md)(万物皆注册工具 + 能力×策略限权)。**子系统**:[store.md](docs/works/store.md)(两层存储 files / 派生=结构化 DuckDB+可插拔检索后端)、[search.md](docs/works/search.md)(检索作为 source 段,引擎可插拔 lance/duck-vss)
 
 Apache-2.0。

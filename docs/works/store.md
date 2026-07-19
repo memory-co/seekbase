@@ -1,27 +1,28 @@
 # store — 两层存储设计(files canonical / DuckDB 派生)
 
-> 状态:**已落**(files→行→检索:文件 append、DuckDB 单表行 + 就地 vss/fts 索引;`rebuild` replay)。**单引擎:结构化 + 向量 + 全文全在一个 `duck.db`,没有 LanceDB。写入同步、主键写一次(重复报错);delete 是软删墓碑、无物理删 / vacuum**(文件真·纯 append,零例外)。本文定下两层存储的角色、files 目录结构(**按天分区、每表一个 append 日志**)、insert 的「文件最先」原子性顺序,以及用 files 校准派生层的机制。
+> 状态:**files 层已落;检索后端按 pipeline 方向改为可插拔(设计稿)**。两层存储:**canonical 文件**(纯 append,权威)+ **派生层**——结构化 DuckDB + **可插拔检索后端**(duck-vss 就地长在业务表 / LanceDB 独立库,见 [search.md](search.md))。写入同步、主键写一次(重复报错);delete 是软删墓碑、无物理删 / vacuum(文件真·纯 append,零例外)。本文定下两层存储的角色、files 目录结构(**按天分区、每表一个 append 日志**)、insert 的「文件最先」原子性顺序,以及用 files 校准派生层的机制。
 
 ## 1. 两层存储,一个端口
 
-一次写入落到两层:canonical 文件 + 派生的 DuckDB(单文件,**每张业务表一张物理表**,行里就带向量 / 全文列)。
+一次写入落到两层:canonical 文件 + 派生层(结构化 DuckDB + 可插拔检索后端)。
 
 ```
-                        Seekbase(端口)
-          ┌─────────────────┴─────────────────┐
-       files                          DuckDB(duck.db 单文件)
-    (canonical)                每业务表一张物理表 _sb_<表>
-   可 grep/diff          业务列 + ds/created_at/deleted_ds/deleted_at
-                        + 每个可搜列的 _vec_<列>(vss)/ _tok_<列>(fts)
-          └────────── 派生自 files,可从 files 重建 ──────────┘
+                             Seekbase(端口)
+          ┌───────────────────────┴───────────────────────┐
+       files                                      派生层(可从 files 重建)
+    (canonical)                    ┌──────────────────┬──────────────────────┐
+   可 grep/diff              结构化 DuckDB          检索后端(可插拔)
+                          _sb_<表>:业务列 +      duck-vss:_vec/_tok 就地长在 _sb_<表>
+                          ds/created_at/          ── 或 ──
+                          deleted_ds/deleted_at   LanceDB:独立版本化向量库
+          └────────────── 派生自 files,可从 files 重建 ──────────────────────┘
 ```
 
 - **files = canonical(权威)**:数据的真相。纯文本 JSONL、可 `grep`/`cat`/`diff`/git,是可审计、可信任的底线。
-- **DuckDB = 派生(单引擎)**:每张业务表一张物理表 `_sb_<表>`,可从 files 重建。一行 = 一个主键(**写一次**),行里同时带:
-  - 业务列 + 引擎元数据(`ds`/`created_at`/`deleted_ds`/`deleted_at`)——过滤、聚合、join、`ds` 时间窗都在这张表上。
-  - 每个 `searchable` 列的 `_vec_<列> FLOAT[dim]`(`vss`/HNSW 索引,向量语义)+ `_tok_<列>`(`fts`/BM25 索引,全文;中文经 jieba 分词)。`search(列, …)` 直接在这张表上 hybrid 融合。**这就是原来 LanceDB 的角色**,现在收进同一张表、同一个 `duck.db`。
-
-整个 DuckDB 都可从 files 整体重灌(`rebuild()`),坏了 / 丢了都不致命——files 在,库就在。**单文件让打开的 fd 数恒定**,避开 LanceDB 版本化碎片文件的 EMFILE/fd 耗尽(见 [search.md](search.md))。
+- **派生层 = 结构化 DuckDB + 检索后端**,都可从 files 重建:
+  - **结构化 DuckDB**:每张业务表一张物理表 `_sb_<表>`,一行 = 一个主键(**写一次**),带业务列 + 引擎元数据(`ds`/`created_at`/`deleted_ds`/`deleted_at`)——过滤、聚合、join、`ds` 时间窗、以及管道里所有 transform 段的 SQL 都在这张表上跑。
+  - **可插拔检索后端**(喂管道的 `search` source 段,见 [search.md](search.md)):**duck-vss** 把 `_vec_<列>`/`_tok_<列>` 就地长在 `_sb_<表>` 上(同一 `duck.db`);**LanceDB** 则是一个独立版本化向量库。选谁是场景决策(fd vs 内存 vs 版本化),不再全局钦定。
+- 派生层可从 files 整体重灌(`rebuild()`),坏了 / 丢了都不致命——files 在,库就在。检索后端的 fd/内存取舍见 [search.md §5](search.md)。
 
 ## 2. files 目录结构:按天分区,每表一个 append 日志
 
@@ -93,7 +94,7 @@ file 面  ≥  DuckDB 面(行 + vss + fts,同一事务落地)
 ```
 
 - **file 面永不缺数据**,至多瞬时超前 DuckDB 一步(崩溃后由 repair 收敛)。
-- **DuckDB 面强一致且检索同步**:因为向量在 insert 时就地 embed、随行同事务落库、FTS 同步重建——**没有异步兑现窗口**,`insert` 返回即 `search()` 可见(结构化查询本就强一致)。
+- **派生层强一致且检索同步**:因为向量在 insert 时就地 embed、随行落库、检索后端同步就绪(duck-vss FTS 重建 / lance append)——**没有异步兑现窗口**,`insert` 返回即 `search` 段可见(结构化查询本就强一致)。
 
 崩溃发生在哪一步,都能用 files 校准:
 
@@ -113,7 +114,7 @@ file 面  ≥  DuckDB 面(行 + vss + fts,同一事务落地)
 
 - **canonical**:往 `ds=删除日/<表>.jsonl` **append 一条墓碑记录** `{"_deleted": "<pk>", "deleted_at": "…"}`。纯 append,历史文件永不回改。
 - **派生 DuckDB**:对那一行 **`UPDATE deleted_ds=删除日, deleted_at=…`**(软删标记)——只动非索引的元数据列,行仍在。
-- **检索**:`search()` 的候选子句带 `deleted_ds IS NULL`,软删的行不再被带出(其 `_tok` 还在 BM25 索引里,但被这条谓词裁掉)。
+- **检索**:管道的 `search` source 段候选子句带 `deleted_ds IS NULL`,软删的行不再被带出(其索引项还在检索后端里,但被这条 as-of 谓词裁掉,见 [search.md §6](search.md))。
 
 要点:
 
@@ -125,4 +126,4 @@ file 面  ≥  DuckDB 面(行 + vss + fts,同一事务落地)
 
 ## 6. 与 file-canonical 的关系
 
-file-canonical 模式不变、且更彻底:文件仍是权威,DuckDB 仍是派生索引。变的是**谁维护文件**——从「各 store 手写文件 ops」收进 seekbase:**每张表自动镜像**成按天分区的 `<表>.jsonl`(不需要 schema 声明落哪、怎么落),写路径自动「文件 → DuckDB 行(含 vss+fts)」,谁也不会忘了哪一边。检索这一层从进程外的 LanceDB 收进同一张 DuckDB 表,少一个引擎、少一套 fd 运维(见 [search.md](search.md))。
+file-canonical 模式不变、且更彻底:文件仍是权威,派生层(结构化 DuckDB + 检索后端)仍是从它派生的索引。变的是**谁维护文件**——从「各 store 手写文件 ops」收进 seekbase:**每张表自动镜像**成按天分区的 `<表>.jsonl`(不需要 schema 声明落哪、怎么落),写路径自动「文件 → 结构化行 + 检索后端索引」,谁也不会忘了哪一边。检索后端是**可插拔**的(duck-vss 就地长在业务表 / LanceDB 独立库),两者都从同一份 canonical 文件重建——选谁按场景的 fd/内存/版本化取舍定(见 [search.md §5](search.md))。
