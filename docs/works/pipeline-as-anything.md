@@ -36,6 +36,8 @@ search cards "pty 终端"                             │ source:LanceDB hybrid 
 
 只要一个东西**能吃一张表、能吐一张表**,它就能当 stage 挂进管道。搜索、SQL、shell、HTTP —— 在这条铁律下是**同一种公民**。这就是 "pipeline as anything"。
 
+> **source/transform/tool/sink 是描述性角色,不是声明的类型**。除 transform(= SQL 缺省,§2.1)外,一个工具**只声明它收/吐什么格式**(`accepts`/`emits`);是不是 source(无输入)、sink(终端输出)由格式**推导**出来,不用手贴 `kind` 标签。完整的格式契约(以及为什么不要 `kind`)见 [tool-plugin.md §8](tool-plugin.md)。
+
 ### 2.1 「一切皆表」不等于「一切都切成段」
 
 这是这套设计最容易被滥用的地方,先钉死:**`|` 标的是 DuckDB 自己跨不过去的接缝**(lance→duck、duck→bash、duck→http),**不是**语法便利。一条 SQL 能干的事(`WHERE`/`ORDER BY`/`LIMIT`/`JOIN`/聚合/窗口),就**在一段 SQL 里干完**,绝不拆成 `where | sort | limit`——那只是把 SQL 重写成一个更弱的管道 DSL,纯亏。推论:
