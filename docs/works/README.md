@@ -10,7 +10,7 @@
 |---|---|
 | [pipeline-as-anything.md](pipeline-as-anything.md) | **设计稿**:query = SPL 式管道,`stage \| stage`,一切皆表(`_in` ABI);**SQL 一等公民**——一段首 token 命中工具才走工具、否则整段是 SQL;`\|` 只在跨引擎/跨进程的**接缝**出现(§2.1「接缝才切」),纯 SQL query 零管道;检索退成一个 source 段,同管道可串 `bash`/HTTP/`grep`;代价是失去全局优化 + tool 段的安全围栏 |
 | [tool-registry.md](tool-registry.md) | **设计稿**:万物皆注册工具——`search` 只是一条最佳实践,`find`/`sed`/`grep`/`sh` 平级注册;注册契约(kind/签名/caps/handler)+ **权限范围**(Claude/Codex 式:能力 capability × 策略 policy,默认 `read-only`、`EXEC` 默认关、放行也在沙箱里),给 pipeline §9 的安全洞一道正式围栏 |
-| [tool-plugin.md](tool-plugin.md) | **设计稿(作者视角)**:要写一个工具,得实现什么 plugin?核心契约 `run(in_table, args, ctx) → out_table`;三种作者形态(函数式 / 类式 Protocol / 外部命令式包 CLI);`ctx` 是 capability-based 的唯一外界入口(ambient authority 拒绝),诚实声明 caps + 输出 schema;三个完整例子(`grep`/`rss`/`jq`)+ 测试 + 诚实代价 |
+| [tool-plugin.md](tool-plugin.md) | **设计稿(作者视角)**:要写一个工具,得实现什么 plugin?核心契约 `run(in_table, args, ctx) → out_table`;**无状态 vs 服务型**——`grep` 无常驻进程(只 `run`),`search` 是带常驻引擎/RAM 索引的服务(`start`/`run`/`stop`);三种作者形态、`ctx` 是 capability-based 唯一外界入口、诚实声明 caps + 输出 schema;三个例子从简到繁(`grep`/`search`/`jq`)+ 测试 + 诚实代价 |
 
 **子系统专题:**
 
