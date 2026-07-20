@@ -1,6 +1,6 @@
 # architecture — 分层与调用链
 
-> 状态:**设计稿(pipeline 方向,未落)**。seekbase 的代码分层与一次调用怎么流过它们。**读是一根管道**(SPL 式,`stage | stage`,见 [pipeline-as-anything.md](pipeline-as-anything.md)):检索是一个 source 段、transform 段是原生 DuckDB SQL、tool 段跳出 DuckDB。**结构化 DuckDB + 可插拔检索后端**(lance / duck-vss)+ 文件镜像;两种使用形态(嵌入 / HTTP)共用同一套 service。
+> 状态:**设计稿(pipeline 方向,未落)**。seekbase 的代码分层与一次调用怎么流过它们。**读是一根管道**(SPL 式,`stage | stage`,见 [pipeline-as-anything.md](pipeline-as-anything.md)):检索是一个 source 段、transform 段是原生 DuckDB SQL、算子段跳出 DuckDB。**结构化 DuckDB + 可插拔检索后端**(lance / duck-vss)+ 文件镜像;两种使用形态(嵌入 / HTTP)共用同一套 service。
 >
 > **和现网代码的差异**:现网读路径是 `ReadService` + rewrite 层(`extract_searches`/`search_target`/缝合)+ 单条 SQL,检索焊死在 DuckDB-vss;本文按管道方向把读路径换成**管道编译器**,rewrite 层退休、检索引擎可插拔。写路径(WriteService worker / ticket / files-first)基本不变。
 
@@ -37,12 +37,12 @@ client.py / server.py    两形态入口:open(嵌入)/ connect(远程) / seekbas
 Seekbase.query(pipeline)                              # client.py:构造 Request(op=query,载荷=管道串)
   → LocalExecutor.execute                             # client.py(LocalExecutor):op→service
     → PipelineService.run                            # service/pipeline_service.py:薄编排
-        parse(pipeline)                               #   按 | 切段;每段看首 token:命中 registry→工具,否则当 SQL(缺省)
+        parse(pipeline)                               #   按 | 切段;每段看首 token:命中 registry→算子,否则当 SQL(缺省)
         for stage in stages:  fold _in                #   逐段重绑 _in
           ├─ source: search →                         #   EmbeddingService.embed+tok → SearchService.hybrid(表,列,向量,token)
           │                                           #     → 物化成 _in(pk, _score, …)
           ├─ SQL(缺省,首 token 不命中)→              #   StoreService.run_sql(sql, _in):只读守卫 + 可见性视图
-          └─ tool: sh/http/grep →                     #   registry 命中 + 策略放行 → 序列化 _in → 子进程 → 回 _in
+          └─ external: sh/http/grep →                     #   registry 命中 + 策略放行 → 序列化 _in → 子进程 → 回 _in
   → {"rows": [...]}                                    # 末段 _in 逐层原样返回
 ```
 
@@ -69,14 +69,14 @@ Seekbase.insert(table, rows)                          # client.py → Request(op
 ## 4. 关键接缝
 
 - **两形态接缝 = `Request` + executor**:`client` 只构造 `Request`(读的载荷是管道串),不认识本地/远程;`LocalExecutor`→service,`HttpExecutor`(`api/remote.py`)→HTTP。`Ticket` 在 HTTP 边界 `to_wire`/`from_wire`,client 本地/远程拿到的都是 `Ticket`,传输无关。
-- **管道接缝 = `_in` 表(stage ABI)**:段与段之间只交换一张关系,恒名 `_in`。DuckDB 段间零拷(temp view),tool 段跨进程才序列化(Arrow/JSONL)。检索引擎的接缝也在这里——`SearchService` 产表、下游 SQL 读表。
+- **管道接缝 = `_in` 表(stage ABI)**:段与段之间只交换一张关系,恒名 `_in`。DuckDB 段间零拷(temp view),算子段跨进程才序列化(Arrow/JSONL)。检索引擎的接缝也在这里——`SearchService` 产表、下游 SQL 读表。
 - **单写者 bridge**(`runtime/bridge.py`):一个单线程持有唯一 DuckDB 连接,所有 DuckDB 操作串行化。读走 ReadPool 的 cursor(MVCC 并发,不排在写后,见 [concurrency.md](concurrency.md))。
 - **canonical 是文件**:`StoreService` 的 DuckDB 和 `SearchService` 的检索后端都是从文件可重建的**派生层**;`AdminService.rebuild` 重放镜像重灌两者(见 [store.md](store.md))。
 
 ## 5. 与其他文档
 
 - [pipeline-as-anything.md](pipeline-as-anything.md):读为什么是管道、`_in` 表 ABI、`search()` UDF 为何退休、SQL 是缺省。
-- [tool-registry.md](tool-registry.md):`PipelineService` 编译期查的 tool registry + 能力/策略/沙箱权限围栏。
+- [operator-registry.md](operator-registry.md):`PipelineService` 编译期查的 operator registry + 能力/策略/沙箱权限围栏。
 - [store.md](store.md):两层存储(files canonical / 派生 = 结构化 DuckDB + 检索后端)、rebuild、一致性。
 - [search.md](search.md):`search` source 段 + 可插拔引擎(lance / duck-vss)+ RRF + jieba。
 - [time_machine.md](time_machine.md):`ds`/`deleted_ds` 可见性谓词,作为 source 段入参。

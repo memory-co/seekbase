@@ -332,7 +332,7 @@ class NotFound(SeekbaseError): ...              # ticket 不存在 → 404
 - **并发**:并发写 + 前台读 + file 面 grep 并行,断言无锁读到完整文件、无半截 JSON。
 - **两形态一致性**:同一条链分别走嵌入与 server(用 httpx `ASGITransport` 在进程内打全链路),断言结果一致、错误保型过线、as-of 只读闸在 HTTP 上也生效。
 - **`ApiEmbedder` 冒烟**:mock 掉 httpx 端点断言批量/重试/维度;真端点用例标记跳过(需 key)。
-- 工具:`pytest` + `pytest-asyncio`;每测试一个临时 `data_dir`(tmp_path)。
+- 算子:`pytest` + `pytest-asyncio`;每测试一个临时 `data_dir`(tmp_path)。
 
 ---
 

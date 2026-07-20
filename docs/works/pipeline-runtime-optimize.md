@@ -4,7 +4,7 @@
 >
 > 于是「优化」有了精确含义:**同一条 query 有多种降级方案,成本差一个数量级,编译器要挑便宜的那个。** 本文就是这套挑法。
 >
-> 依赖:[pipeline-as-anything.md](pipeline-as-anything.md)(前端语法、`_in` ABI、§2.1「接缝才切」)、[tool-plugin.md](tool-plugin.md)(算子契约:`nativeDuckdb` / `nativeBash` / 保底 `run`)。
+> 依赖:[pipeline-as-anything.md](pipeline-as-anything.md)(前端语法、`_in` ABI、§2.1「接缝才切」)、[operator-plugin.md](operator-plugin.md)(算子契约:`native_duckdb` / `native_bash` / 保底 `run`)。
 
 ## 1. 前提:管道是编译前端,不是运行时
 
@@ -56,7 +56,7 @@ parse        →  段序列 s1..sn(首 token 命中 registry = 算子,否则 SQL
 ```
 段:      search      grep       SELECT      sh 'jq …'    SELECT
 H(si):  {duck,bash} {duck,bash}  {duck}      {bash}      {duck}
-                                    ↑ SQL 段只能在 duck    ↑ 只有 nativeBash
+                                    ↑ SQL 段只能在 duck    ↑ 只有 native_bash
 
 最小切换解:  duck   →  duck   →   duck    →   bash    →  duck      = 2 次切换
 ```
@@ -74,8 +74,8 @@ search cards "…" | grep ERROR | SELECT … | sh 'jq …' | SELECT …
 ```
 `jq` 用 ③ 包成 vtab,整条**仍是一条 DuckDB SQL**:
 ```sql
-WITH s0 AS (SELECT * FROM lance_search('cards','…')),      -- search.nativeDuckdb
-     s1 AS (SELECT * FROM s0 WHERE regexp_matches(…)),      -- grep.nativeDuckdb ← 关键:没用 vtab
+WITH s0 AS (SELECT * FROM lance_search('cards','…')),      -- search.native_duckdb
+     s1 AS (SELECT * FROM s0 WHERE regexp_matches(…)),      -- grep.native_duckdb ← 关键:没用 vtab
      s2 AS (SELECT … FROM s1),
      s3 AS (SELECT * FROM bash_vtab('jq …', TABLE s2))      -- ③ 唯一的桥
 SELECT … FROM s3
@@ -89,51 +89,57 @@ search cards "…" | grep ERROR | sh 'jq …' | sh 'sort -u'
 ```
 两段独立:先一条 DuckDB SQL(`WITH s0, s1`),物化一次,再一条 bash pipeline(`jq … | sort -u`)。**没有 vtab**,两侧各自全优化——这就是你说的「互相不交叉就独立成段」。
 
-**(c) `grep` 有 `nativeDuckdb` 省掉的那次 vtab**
+**(c) `grep` 有 `native_duckdb` 省掉的那次 vtab**
 
 ```
 search … | grep ERROR | SELECT … | SELECT …
 ```
-- `grep` **只有** `nativeBash` → 指派成 `duck,bash,duck,duck`,2 次切换,中间要架一座 vtab 桥。
-- `grep` **有** `nativeDuckdb`(把 grep 能力整个翻译成 `WHERE regexp_matches(...)`)→ 全段 `duck`,**0 次切换、0 座桥**,而且 DuckDB 优化器能把这个 `WHERE` 和上下游一起优化(甚至下推进 `search` 的表函数)。
+- `grep` **只有** `native_bash` → 指派成 `duck,bash,duck,duck`,2 次切换,中间要架一座 vtab 桥。
+- `grep` **有** `native_duckdb`(把 grep 能力整个翻译成 `WHERE regexp_matches(...)`)→ 全段 `duck`,**0 次切换、0 座桥**,而且 DuckDB 优化器能把这个 `WHERE` 和上下游一起优化(甚至下推进 `search` 的表函数)。
 
-> 这就是**为什么值得给一个算子写两版 native**:不是为了「能在两边跑」,是为了**让它不成为切换点**。一堆 duck 段中间夹一个只会 bash 的 `grep`,代价是整条管道被劈开;给它一版 `nativeDuckdb`,代价归零。
+> 这就是**为什么值得给一个算子写两版 native**:不是为了「能在两边跑」,是为了**让它不成为切换点**。一堆 duck 段中间夹一个只会 bash 的 `grep`,代价是整条管道被劈开;给它一版 `native_duckdb`,代价归零。
 
 ## 6. 算子要交的作业:两版 native
 
 ```python
-Tool(
-    name = "grep", accepts={Fmt.TABLE}, emits=Fmt.TABLE, caps={Cap.PURE},
-    native_duckdb = lambda prev, a: f"SELECT * FROM {prev} WHERE regexp_matches({a.field}, {a.pat!r})",
-    native_bash   = lambda a: ["grep", "-E", a.pat],
-    run           = grep_run,        # 保底:两边都没有时,框架包成 vtab(③)
-)
+class Grep(Operator):
+    name = "grep"; accepts = {Fmt.TABLE}; emits = Fmt.TABLE; caps = {Cap.PURE}
+
+    def _regex(self, args): return args.pattern              # 三条路共用一份参数逻辑
+
+    def native_duckdb(self, prev, args):                     # duck 宿主:整个翻译成 WHERE
+        return f"SELECT * FROM {prev} WHERE regexp_matches({args.field}, {self._regex(args)!r})"
+
+    def native_bash(self, args):                             # bash 宿主:就是 grep 本身
+        return ["grep", "-E", self._regex(args)]
+
+    def run(self, in_data, args, ctx): ...                   # 保底:两边都没有时,框架包成 vtab(③)
 ```
 
-三格**都可选**,但填得越多、编译器可挑的越多:
+三个覆写点**都可选**,但覆写得越多、编译器可挑的越多(**由框架检测覆写得出,不用声明**):
 
-| 只填 | 后果 |
+| 只覆写 | 后果 |
 |---|---|
 | `run` | 永远走 ③ vtab;能跑,最贵 |
-| 一版 `native*` | 在那个宿主里免费,在另一个宿主里是**切换点** |
-| 两版 `native*` | **永不成为切换点**——跟着上下文走,零成本 |
+| 一个 `native_*` | 在那个宿主里免费,在另一个宿主里是**切换点** |
+| 两个 `native_*` | **永不成为切换点**——跟着上下文走,零成本 |
 
 ### 6.1 `search` 的两版(两条都是真实的实现路径)
 
-| | `nativeBash` | `nativeDuckdb` |
+| | `native_bash` | `native_duckdb` |
 |---|---|---|
 | 怎么实现 | 一个小命令,**直接调 LanceDB SDK** 查询,结果吐到 stdout | 用 **DuckDB × LanceDB 官方集成**,在 DuckDB 里直接查 |
 | 长什么样 | `seekbase-search cards '…' --k 100` | `FROM lance_search('cards', '…', k := 100)` |
 | 落在哪 | bash 宿主的管道头 | `WITH` 链的第一个 CTE |
 | 好在哪 | bash 侧不必为了检索绕回 duck | 检索**进了优化器视野**:下游 `WHERE kind='issue'` / `LIMIT` 有机会下推进检索 |
 
-**两版都有 ⇒ `search` 不挑宿主**,跟着管道其余部分走。`nativeDuckdb` 那版尤其值:它把 [search.md §4](search.md) 的 over-fetch ×2 从「盲目多取一倍」变成「优化器知道下游要多少」。
+**两版都有 ⇒ `search` 不挑宿主**,跟着管道其余部分走。`native_duckdb` 那版尤其值:它把 [search.md §4](search.md) 的 over-fetch ×2 从「盲目多取一倍」变成「优化器知道下游要多少」。
 
 ## 7. vtab 桥怎么架(两个方向)
 
 - **duck 里插 bash**:注册一个 **table in-out function**——吃上游关系当表参数,fork 子进程,按批把行序列化进 stdin(Arrow IPC 优先,JSONL 退化),从 stdout 解析回批。DuckDB 侧看到的是普通表函数,`FROM bash_vtab('jq …', TABLE s2)`。
 - **bash 里插 duck**:反过来,管道中间放一个 `duckdb -c "COPY (SELECT … FROM read_json_auto('/dev/stdin')) TO '/dev/stdout' (FORMAT JSON)"`——DuckDB CLI 本来就能读写 `/dev/stdin`/`/dev/stdout`,这一段就是普通的 bash 命令。
-- **Python `run` 算子同理**:没有任何 `native*` 的算子,由框架包成 duck 侧的 vtab(批回调就是它的 `run`/`process`),或包成 bash 侧的一个子命令。
+- **Python `run` 算子同理**:没有任何 `native*` 的算子,由框架包成 duck 侧的 vtab(批回调就是它的 `run`),或包成 bash 侧的一个子命令。
 
 ## 8. 语义等价是作者的责任(必须有 differential test)
 
@@ -145,7 +151,7 @@ Tool(
 
 ## 9. 有界性塌缩成宿主属性
 
-[tool-plugin.md §3.3](tool-plugin.md) 那套 `bounded` 传播,在这个后端下**大部分不需要了**——有界性变成宿主自带的性质:
+Flink 那套 `bounded` 传播机制,在这个后端下**根本不用实现**——有界性是宿主自带的性质([operator-plugin.md §3.3](operator-plugin.md)):
 
 | 宿主 | 有界性 | 说明 |
 |---|---|---|
@@ -168,12 +174,12 @@ sh 'tail -f app.log' | SELECT count(*) FROM _in
 - **双 native = 双份维护 + 等价性风险**(§8)。只写一版是完全正当的选择;它只是意味着这个算子**是个切换点**,请在文档里说清楚。
 - **成本模型是假的**:常数切换成本会在「小表处切 vs 大表处切」上选错。要真优化得接基数估计——而基数只有 DuckDB 侧知道,bash 侧无从估计,**这是这套模型固有的盲区**。
 - **可解释性变差**:用户写的是 5 段管道,跑的是 1 条 SQL + 1 个子进程。报错信息、行号、性能归因都要能映射回用户写的那一段,否则不可用(所以 §8 的 `EXPLAIN` 是必需品不是奢侈品)。
-- **bash 宿主 = `EXEC` 能力**:整条管道降级成 bash pipeline 意味着起子进程,[tool-registry.md](tool-registry.md) 的策略/沙箱**照常适用**——默认 `read-only` 下 bash 宿主直接不可用,不因为「它只是个编译目标」而放松。
+- **bash 宿主 = `EXEC` 能力**:整条管道降级成 bash pipeline 意味着起子进程,[operator-registry.md](operator-registry.md) 的策略/沙箱**照常适用**——默认 `read-only` 下 bash 宿主直接不可用,不因为「它只是个编译目标」而放松。
 
 ## 11. 与其他文档
 
 - [pipeline-as-anything.md](pipeline-as-anything.md):前端语法与 `_in` ABI;§2.1「接缝才切」在这里得到可计算的定义(**真接缝 = 宿主切换点**)。
-- [tool-plugin.md](tool-plugin.md):算子契约——`native_duckdb` / `native_bash` / 保底 `run`;§3.3 的 `bounded` 传播按本文 §9 简化。
-- [tool-registry.md](tool-registry.md):bash 宿主 = `EXEC`,能力/策略/沙箱不因编译降级而放松。
-- [search.md](search.md):`search` 的两版 native(LanceDB SDK / DuckDB×LanceDB 官方集成),以及 `nativeDuckdb` 版让 over-fetch 进入优化器视野。
+- [operator-plugin.md](operator-plugin.md):算子契约——`native_duckdb` / `native_bash` / 保底 `run`;§3.3 的 `bounded` 传播按本文 §9 简化。
+- [operator-registry.md](operator-registry.md):bash 宿主 = `EXEC`,能力/策略/沙箱不因编译降级而放松。
+- [search.md](search.md):`search` 的两版 native(LanceDB SDK / DuckDB×LanceDB 官方集成),以及 `native_duckdb` 版让 over-fetch 进入优化器视野。
 - [architecture.md](architecture.md):`PipelineService` = 本文这个编译器,不是执行器。
