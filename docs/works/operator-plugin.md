@@ -126,6 +126,8 @@ class Grep(Operator):
         return in_table.filter(lambda r: pat.search(str(r[args.field])))
 ```
 
+> **`compile_duck` / `compile_bash` 只是当下的两个 —— 方法名里嵌的是 runtime 名,而 runtime 是开放集。** 管道降级到哪个 runtime(DuckDB / bash / 未来的 WASM、远程…)是[pipeline-runtime-optimize.md](pipeline-runtime-optimize.md)的事;对算子作者,加一个 runtime `R` 就是多一个可覆写的 `compile_R`,基类不动、老算子不改(没覆写就在 `R` 里走保底 vtab)。别把 runtime 和 `search` 内部的**引擎后端**(LanceDB / duck-vss)混为一谈——那是两层(pipeline-runtime-optimize §1.1)。
+
 **覆写哪几个决定你贵不贵**——由框架**检测覆写**得出(不用声明,和 `kind` 同一原则,§8):
 
 | 你覆写了 | 后果 |

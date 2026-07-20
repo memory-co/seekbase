@@ -1,8 +1,8 @@
 # pipeline-runtime-optimize — 管道不自己跑:降级到 DuckDB `WITH` / bash pipeline,以及怎么少花钱
 
-> 状态:**设计稿(pipeline 方向,未落)**。[pipeline-as-anything.md](pipeline-as-anything.md) 定的是**前端**(query = `stage | stage`);本文定**后端**:这根管道**不由 seekbase 自己执行**,而是被**降级(lowering)**成两个现成运行时之一——**DuckDB 的 `WITH` 链**或 **bash 的 pipeline**。我们不造管道运行时,我们造编译器。
+> 状态:**设计稿(pipeline 方向,未落)**。[pipeline-as-anything.md](pipeline-as-anything.md) 定的是**前端**(query = `stage | stage`);本文定**后端**:这根管道**不由 seekbase 自己执行**,而是被**降级(lowering)**到一个 **pipeline runtime(运行时/宿主)**。runtime 是一个**开放集**——今天有两个(**DuckDB 的 `WITH` 链**、**bash 的 pipeline**),外加一个保底的 **Python-vtab**;后续可以再加(§10)。我们不造管道运行时,我们造一个**面向多 runtime 的编译器**。
 >
-> 于是「优化」有了精确含义:**同一条 query 有多种降级方案,成本差一个数量级,编译器要挑便宜的那个。** 本文就是这套挑法。
+> 于是「优化」有了精确含义:**同一条 query 有多种降级方案(落到哪个 runtime、在哪切),成本差一个数量级,编译器要挑便宜的那个。** 本文就是这套挑法。
 >
 > 依赖:[pipeline-as-anything.md](pipeline-as-anything.md)(前端语法、`_in` ABI、§2.1「接缝才切」)、[operator-plugin.md](operator-plugin.md)(算子契约:`compile_duck` / `compile_bash` / 保底 `run`)。
 
@@ -20,9 +20,26 @@
                               (一条 SQL:全局优化白送)
 ```
 
-- **管道里的 `|` 大多数会被编译掉**。同宿主的相邻段之间,`|` 只是语法——落到 `WITH` 里是一个 CTE 边界(DuckDB 优化器**看穿**它),落到 bash 里是一个真管道符(内核给背压)。
-- **只有跨宿主的 `|` 是真接缝**。这给了 pipeline §2.1「接缝才切」一个可计算的定义:**真接缝 = 宿主切换点**,数量由编译器算出来,不由用户写出来。
-- **两个宿主各自带来白送的东西**:DuckDB `WITH` = 跨段谓词下推 / join 重排 / 基数估计;bash pipeline = 背压、增量、无界流。**这正是不自己造运行时的理由**——自己造的话这两样都得重写一遍,还写不过它们。
+- **管道里的 `|` 大多数会被编译掉**。同 runtime 的相邻段之间,`|` 只是语法——落到 `WITH` 里是一个 CTE 边界(DuckDB 优化器**看穿**它),落到 bash 里是一个真管道符(内核给背压)。
+- **只有跨 runtime 的 `|` 是真接缝**。这给了 pipeline §2.1「接缝才切」一个可计算的定义:**真接缝 = runtime 切换点**,数量由编译器算出来,不由用户写出来。
+- **每个 runtime 各自带来白送的东西**:DuckDB `WITH` = 跨段谓词下推 / join 重排 / 基数估计;bash pipeline = 背压、增量、无界流。**这正是不自己造运行时的理由**——自己造的话这些都得重写一遍,还写不过它们。
+
+> **术语:本文的「宿主(host)」= 「pipeline runtime」,同一个东西的两个叫法。** 下文混用,都指「承载一段(或整条)管道执行的那个引擎」。
+
+### 1.1 两层,别混:pipeline runtime ⊥ 算子内部的引擎后端
+
+这是最容易混的一处,先钉死。seekbase 里有**两层**都叫得上「引擎」,但它们**不在一个层级**:
+
+| | **pipeline runtime(本文)** | **引擎后端(算子内部)** |
+|---|---|---|
+| 是什么 | 承载**整条管道**执行的运行时 | 藏在**某一个算子**背后的实现 |
+| 例子 | DuckDB `WITH` / bash pipeline / Python-vtab | `search` 的 LanceDB / DuckDB-vss([search.md](search.md)) |
+| 谁选它 | **编译器**(宿主指派,§4) | **算子作者**(注册哪个后端实例,operator-plugin §10.2) |
+| 可扩展性 | 开放集,加一个新 runtime 见 §10 | 开放集,加一个新召回后端见 search.md |
+| 对 `_in` 的关系 | `_in` 在它里面**流动**(CTE 名 / stdin) | 它**产出** `_in`,不承载下游 |
+
+- **LanceDB 不是 runtime**。它是 `search` 这**一个算子**的召回后端;`search` 把它的结果**吐成 `_in`** 之后,就回到 runtime 的世界了。所以 §6.1 里 `search.compile_duck` 走 DuckDB×LanceDB 官方集成、`search.compile_bash` 调 LanceDB SDK——**LanceDB 在两个 runtime 里都出现,但它始终是 search 的内部实现,从不是宿主**。换掉 LanceDB(比如换成 duck-vss)只动 `search` 一个算子;换掉 runtime 动的是整条管道怎么编译。
+- **为什么当初的「引擎可插拔」和现在的「runtime」不打架**:pipeline-as-anything §8 讲的是**前者**(search 背后引擎可换),本文讲的是**后者**(整条管道落到哪个 runtime)。一个是算子内部的纵深,一个是管道外壳的横向宿主——两根正交的可扩展轴。
 
 ## 2. 三种降级手段 = 一条代价阶梯
 
@@ -42,7 +59,7 @@
 
 ```
 parse        →  段序列 s1..sn(首 token 命中 registry = 算子,否则 SQL,见 pipeline §6)
-候选宿主      →  H(si) ⊆ {duck, bash}:由 si 实现了哪些 compile_* 决定;都没实现 = {vtab-only}
+候选宿主      →  H(si) ⊆ {duck, bash, …}:由 si 覆写了哪些 compile_<runtime> 决定;都没有 = {vtab-only}
 宿主指派      →  给每段选一个宿主,使总切换成本最小(§4)
 融合 + codegen →  同宿主的连续段合并;跨宿主处按 ②/③ 落地(§5)
 ```
@@ -135,6 +152,8 @@ class Grep(Operator):
 
 **两版都有 ⇒ `search` 不挑宿主**,跟着管道其余部分走。`compile_duck` 那版尤其值:它把 [search.md §4](search.md) 的 over-fetch ×2 从「盲目多取一倍」变成「优化器知道下游要多少」。
 
+> **注意这张表里 LanceDB 出现了两次,但它不是 runtime**(§1.1)。两栏是**同一个 LanceDB 后端**在两个不同 runtime 里的两种接法:bash runtime 里当子进程调 SDK,duck runtime 里当表函数走官方集成。runtime 是 duck / bash,LanceDB 始终是 `search` 的内部后端。
+
 ## 7. vtab 桥怎么架(两个方向)
 
 - **duck 里插 bash**:注册一个 **table in-out function**——吃上游关系当表参数,fork 子进程,按批把行序列化进 stdin(Arrow IPC 优先,JSONL 退化),从 stdout 解析回批。DuckDB 侧看到的是普通表函数,`FROM bash_vtab('jq …', TABLE s2)`。
@@ -167,19 +186,38 @@ sh 'tail -f app.log' | SELECT count(*) FROM _in
 
 价值不变:**把一类「跑起来才发现永远不返回」变成编译期错误**;成本降了——不用发明传播算法,只用问「这一段落在哪个宿主」。
 
-## 10. 诚实的代价 / 边界
+## 10. 加一个新 runtime:扩展契约
 
-- **我们被两个宿主的能力上限锁死。** 不自己造运行时的代价就是:DuckDB 表达不了、bash 也表达不了的东西,seekbase 也表达不了。这是**故意的**——换来两套成熟的优化器/调度器。
+runtime 是**开放集**——`{duck, bash, python-vtab}` 是当下这三个,不是硬编码的上限。为什么会想加?比如 **WASM/沙箱 runtime**(在隔离环境跑不可信算子)、**远程 runtime**(把段推到另一台机 / 一个 serverless)、**GPU/向量 runtime**(专为 embedding 批算)。加一个 runtime `R`,要给编译器四样东西:
+
+| 契约 | 是什么 | duck 的例子 | bash 的例子 |
+|---|---|---|---|
+| **① codegen 目标** | `R` 认什么代码;算子覆写 `compile_R(...)` 返回它 | 一个 CTE 体(SQL 文本) | 一段 argv |
+| **② 拼接算子** | 同 `R` 的相邻段怎么合成一个执行单元 | 串成 `WITH` 链 | 用 `\|` 串成 pipeline |
+| **③ 到别的 runtime 的桥** | `R` ↔ 其它 runtime 怎么 marshal `_in`(§7) | vtab 表函数 / `COPY … /dev/stdout` | stdin/stdout + Arrow/JSONL |
+| **④ 有界性** | `R` 承载的流有界还是可无界(§9) | 必然有界 | 可无界 |
+
+给齐这四样,`R` 就是编译器眼里的一等宿主:宿主指派(§4)的候选集自动多一个 `R`,代价阶梯(§2)对它照常适用,算子只要多覆写一个 `compile_R` 就能免费落进去。**编译器的三个 pass(指派 / 融合 / 桥)对 runtime 数量无感**——最短路在 `{duck, bash, R, …}` 上照跑,融合按「同 runtime」聚合,桥查②③的表。
+
+- **加 runtime 不用改算子**:没覆写 `compile_R` 的老算子,在 `R` 宿主里就走保底 vtab(③)——和今天 `run`-only 算子的待遇一样。**新 runtime 不破坏既有算子**,只是给愿意覆写 `compile_R` 的算子一条新的免费路。
+- **`compile_<runtime>` 的命名不是偶然**:方法名里嵌 runtime 名,正是为了让「加 runtime = 加一族 `compile_R` 覆写」成为纯扩展,基类不用动(operator-plugin §3.2 的方法是开放集,不是固定两个)。
+- **桥是 O(runtime²) 的账**:严格说每对 runtime 都要一座桥。实践上**都经 `_in` 的标准序列化**(Arrow IPC / JSONL)中转,所以每个新 runtime 只需实现「与标准格式互转」一次(读/写 Arrow),不用为每个已有 runtime 各写一座——O(runtime²) 塌成 O(runtime)。这也是为什么 `_in` 恒定一种 ABI(pipeline §2)在这里第二次付红利。
+
+> 边界:**加 runtime 是加执行宿主,不是加查询语言。** 新 runtime 仍然只吃/吐 `_in`、仍然受 operator-registry 的能力/策略约束(远程/EXEC 类默认更严)。它扩的是「这段在哪跑」,不扩「能表达什么」——后者的天花板见 §11 第一条。
+
+## 11. 诚实的代价 / 边界
+
+- **我们被所有 runtime 的能力上限的并集锁死。** 不自己造运行时的代价就是:没有任何一个 runtime 能表达的东西,seekbase 也表达不了。这是**故意的**——换来一批成熟的优化器/调度器,而不是一个自研的半成品。加 runtime(§10)能抬高这个天花板,但每个新 runtime 也带来它自己的运维/安全账。
 - **vtab 是优化屏障**:桥两侧 DuckDB 看不穿,谓词推不进去、基数估计失真,优化器可能因此选坏计划。所以 ③ 是保底不是常态,§5(c) 那种「多写一个 compile_* 消掉桥」的收益是复利的。
 - **双 compile_* = 双份维护 + 等价性风险**(§8)。只写一版是完全正当的选择;它只是意味着这个算子**是个切换点**,请在文档里说清楚。
 - **成本模型是假的**:常数切换成本会在「小表处切 vs 大表处切」上选错。要真优化得接基数估计——而基数只有 DuckDB 侧知道,bash 侧无从估计,**这是这套模型固有的盲区**。
 - **可解释性变差**:用户写的是 5 段管道,跑的是 1 条 SQL + 1 个子进程。报错信息、行号、性能归因都要能映射回用户写的那一段,否则不可用(所以 §8 的 `EXPLAIN` 是必需品不是奢侈品)。
 - **bash 宿主 = `EXEC` 能力**:整条管道降级成 bash pipeline 意味着起子进程,[operator-registry.md](operator-registry.md) 的策略/沙箱**照常适用**——默认 `read-only` 下 bash 宿主直接不可用,不因为「它只是个编译目标」而放松。
 
-## 11. 与其他文档
+## 12. 与其他文档
 
-- [pipeline-as-anything.md](pipeline-as-anything.md):前端语法与 `_in` ABI;§2.1「接缝才切」在这里得到可计算的定义(**真接缝 = 宿主切换点**)。
-- [operator-plugin.md](operator-plugin.md):算子契约——`compile_duck` / `compile_bash` / 保底 `run`;§3.3 的 `bounded` 传播按本文 §9 简化。
+- [pipeline-as-anything.md](pipeline-as-anything.md):前端语法与 `_in` ABI;§2.1「接缝才切」在这里得到可计算的定义(**真接缝 = runtime 切换点**)。
+- [operator-plugin.md](operator-plugin.md):算子契约——`compile_<runtime>`(当前 `compile_duck` / `compile_bash`)/ 保底 `run`;§3.3 的 `bounded` 传播按本文 §9 简化。
 - [operator-registry.md](operator-registry.md):bash 宿主 = `EXEC`,能力/策略/沙箱不因编译降级而放松。
 - [search.md](search.md):`search` 的两个 compile_*(LanceDB SDK / DuckDB×LanceDB 官方集成),以及 `compile_duck` 版让 over-fetch 进入优化器视野。
 - [architecture.md](architecture.md):`PipelineService` = 本文这个编译器,不是执行器。
