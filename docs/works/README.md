@@ -10,7 +10,8 @@
 |---|---|
 | [pipeline-as-anything.md](pipeline-as-anything.md) | **设计稿**:query = SPL 式管道,`stage \| stage`,一切皆表(`_in` ABI);**SQL 一等公民**——一段首 token 命中工具才走工具、否则整段是 SQL;`\|` 只在跨引擎/跨进程的**接缝**出现(§2.1「接缝才切」),纯 SQL query 零管道;检索退成一个 source 段,同管道可串 `bash`/HTTP/`grep`;代价是失去全局优化 + tool 段的安全围栏 |
 | [tool-registry.md](tool-registry.md) | **设计稿**:万物皆注册工具——`search` 只是一条最佳实践,`find`/`sed`/`grep`/`sh` 平级注册;注册契约(格式契约 `accepts`/`emits` / 签名 / caps / handler)+ **权限范围**(Claude/Codex 式:能力 capability × 策略 policy,默认 `read-only`、`EXEC` 默认关、放行也在沙箱里),给 pipeline §9 的安全洞一道正式围栏 |
-| [tool-plugin.md](tool-plugin.md) | **设计稿(作者视角)**:一个 plugin = 一个**可插拔算子**,框架只定算子 ABI(`search`/`grep`/`jq`/SQL 段插的是同一个)。**三个正交轴**:① 格式契约 `accepts`/`emits`(不用 `kind`,source/sink 位置从格式推导)+ coercion;② 无状态 vs **服务型**(`start`/`run`/`stop`,`search` 的常驻引擎 + RAM 索引);③ **参考 Flink 的流动性/有界性**——一次性 `run` vs 推式 `process(chunk,ctx,out)`、`bounded` 传播、**SQL 段要求有界 ⇒ 把 `tail -f` 的挂死变成编译期错误**、Arrow reader 早停(只借 process + 有界性,watermark/checkpoint/keyed state 不借);外加 `ctx` capability 唯一入口、caps + 输出 schema、三个例子 + 测试 + 诚实代价 |
+| [pipeline-runtime-optimize.md](pipeline-runtime-optimize.md) | **设计稿(后端)**:**管道不自己跑**——整条被降级成 DuckDB 的 `WITH` 链或 bash 的 pipeline,于是跨段优化 / 背压都是白送的。三种降级手段的代价阶梯(**同宿主原生翻译 0 成本 > 切段一次物化 > vtab 桥每批 marshal**)、宿主指派 = 一条最短路、连续同宿主段融合、`grep` 多写一版 `nativeDuckdb`(翻成 `WHERE`)如何把切换点消成 0、`search` 的两版 native(bash 调 LanceDB SDK / duck 走官方集成);外加双 native 的语义等价风险(differential test 是准入条件)|
+| [tool-plugin.md](tool-plugin.md) | **设计稿(作者视角)**:一个 plugin = 一个**可插拔算子**,框架只定算子 ABI(`search`/`grep`/`jq`/SQL 段插的是同一个)。**三个正交轴**:① 格式契约 `accepts`/`emits`(不用 `kind`,source/sink 位置从格式推导)+ coercion;② 无状态 vs **服务型**(`start`/`run`/`stop`,`search` 的常驻引擎 + RAM 索引);③ **宿主降级** `native_duckdb` / `native_bash`(填几版决定它会不会成为**切换点**;都不填走保底 vtab——能跑最贵)+ 有界性塌缩成宿主属性(**`tail -f` 进 duck = 编译期报错,不再挂死**;watermark/checkpoint/keyed state 明确不借);外加 `ctx` capability 唯一入口、caps + 输出 schema、三个例子 + 测试 + 诚实代价 |
 
 **子系统专题:**
 
