@@ -1,6 +1,6 @@
 # pipeline-runtime-optimize — 管道不自己跑:降级到 DuckDB `WITH` / bash pipeline,以及怎么少花钱
 
-> 状态:**设计稿(pipeline 方向,未落)**。[pipeline-as-anything.md](pipeline-as-anything.md) 定的是**前端**(query = `stage | stage`);本文定**后端**:这根管道**不由 seekbase 自己执行**,而是被**降级(lowering)**到一个 **pipeline runtime(运行时/宿主)**。runtime 是一个**开放集**——今天有两个(**DuckDB 的 `WITH` 链**、**bash 的 pipeline**),后续可以再加(§10)。算子的物化 `run_duck`/`run_bash` **不是**第三个 runtime,而是**两个 runtime 各自的物化兜底**(duck 里当 vtab、bash 里当读 stdin 的进程,§2)。我们不造管道运行时,我们造一个**面向多 runtime 的编译器**。
+> 状态:**部分已落**(双 runtime + 同 runtime 融合 + ② 切段 JSONL 桥已上线;runtime 指派现为退化型「有 optimize_duck 则 duck、否则 bash」——内建算子的候选集都是单元素,最短路留待双格算子出现;③ 内联桥/vtab 未落)。[pipeline-as-anything.md](pipeline-as-anything.md) 定的是**前端**(query = `stage | stage`);本文定**后端**:这根管道**不由 seekbase 自己执行**,而是被**降级(lowering)**到一个 **pipeline runtime(运行时/宿主)**。runtime 是一个**开放集**——今天有两个(**DuckDB 的 `WITH` 链**、**bash 的 pipeline**),后续可以再加(§10)。算子的物化 `run_duck`/`run_bash` **不是**第三个 runtime,而是**两个 runtime 各自的物化兜底**(duck 里当 vtab、bash 里当读 stdin 的进程,§2)。我们不造管道运行时,我们造一个**面向多 runtime 的编译器**。
 >
 > 于是「优化」有了精确含义:**同一条 query 有多种降级方案(落到哪个 runtime、在哪切),成本差一个数量级,编译器要挑便宜的那个。** 本文就是这套挑法。
 >

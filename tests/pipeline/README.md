@@ -18,12 +18,16 @@ pipeline-runtime-optimize.md)。
    多余参数报错。
 6. **读写守卫穿过管道**:管道段里塞 `DELETE` 一样被拒。
 7. **registry 守卫**:算子名不得撞 SQL 引导关键字;重名显式报错;没有任何
-   duck 实现的算子拒绝注册。
+   可执行格(duck/bash 任一)的算子拒绝注册。
+8. **bash runtime(切段 + JSONL 桥)**:`scan | sh | SELECT` 三 phase(duck→bash→duck),
+   `_in` 以 JSONL 过 stdin/stdout、回程 `read_json_auto` 推类型;相邻 bash 段融成
+   **一条进程链**;bash 段不能打头(有界 query 无 bash source);子进程失败/超时
+   → `QueryError` 带 stderr。
 
 ## 不在这测什么
 
 - `search` 段的检索质量 / 时间窗走 [`search/`](../search/)
-- bash runtime / EXEC 算子 / 能力×策略(M2,未落)
+- 策略判定细节走 [`policy/`](../policy/);流式走 [`streaming/`](../streaming/)
 
 ## fixture 来源
 

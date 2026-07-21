@@ -94,6 +94,90 @@ def _l2_normalize(v: list[float]) -> list[float]:
     return [x / n for x in v] if n else list(v)
 
 
+def _rows_to_jsonl(rows: list[dict]) -> bytes:
+    return b"".join(
+        json.dumps(r, ensure_ascii=False, default=str).encode() + b"\n" for r in rows)
+
+
+def _jsonl_to_rows(data: bytes) -> list[dict]:
+    rows: list[dict] = []
+    for line in data.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError as e:
+            raise QueryError(f"bash stage output is not valid JSONL: {e}") from e
+        if not isinstance(obj, dict):
+            raise QueryError("bash stage output lines must be JSON objects")
+        rows.append(obj)
+    return rows
+
+
+def _run_bash_chain(argvs: list[list[str]], stdin: bytes, timeout: float) -> bytes:
+    """One fused bash run: the argvs chained stdin→stdout like a shell
+    pipeline, inside the sandbox bounds (scratch cwd, minimal env, own process
+    group, wall-clock timeout → the whole group is killed). Network isolation
+    is NOT enforced in-process — the policy layer (deny EXEC / allowlists) is
+    the honest first wall (docs/works/operator-registry.md §6.3)."""
+    import contextlib
+    import os
+    import signal
+    import subprocess
+    import tempfile
+
+    def _kill(p):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+
+    with tempfile.TemporaryDirectory(prefix="sb_sandbox_") as cwd:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C.UTF-8"}
+        procs: list[subprocess.Popen] = []
+        try:
+            for i, argv in enumerate(argvs):
+                p = subprocess.Popen(
+                    argv,
+                    stdin=(subprocess.PIPE if i == 0 else procs[-1].stdout),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=cwd, env=env, start_new_session=True)
+                if i > 0:
+                    procs[-1].stdout.close()      # let SIGPIPE propagate upstream
+                procs.append(p)
+            try:
+                first = procs[0]
+                if len(procs) == 1:
+                    out, err = first.communicate(stdin, timeout=timeout)
+                else:
+                    import threading
+
+                    def _feed():                       # avoid pipe-buffer deadlock:
+                        with contextlib.suppress(BrokenPipeError, OSError):
+                            first.stdin.write(stdin)   # feed from a side thread while
+                            first.stdin.close()        # communicate() drains the tail
+                    threading.Thread(target=_feed, daemon=True).start()
+                    out, err = procs[-1].communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                for p in procs:
+                    _kill(p)
+                raise QueryError(
+                    f"bash stage exceeded the {timeout:.0f}s sandbox timeout") from None
+            rc = procs[-1].wait()
+            for p in procs[:-1]:
+                p.wait()
+            if rc != 0:
+                raise QueryError(
+                    f"bash stage failed (exit {rc}): "
+                    f"{(err or b'').decode(errors='replace')[:400]}")
+            return out
+        except FileNotFoundError as e:
+            raise QueryError(f"bash stage command not found: {e.filename}") from e
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    _kill(p)
+
+
 class StoreService:
     def __init__(self, bridge: Bridge, conn, schema: Schema, dim: int | None,
                  search_backend: str = "vss", lance_dir: Path | None = None) -> None:
@@ -379,13 +463,73 @@ class StoreService:
 
         return await self._reads.run(_do)
 
+    async def run_plan(self, phases: list[tuple], ds_start: str | None,
+                       ds_end: str | None, exec_timeout: float) -> list[dict]:
+        """Execute a compiled multi-runtime plan on one borrowed read cursor:
+        ``("duck", sql, params)`` phases run as guarded SELECTs; ``("bash",
+        [argv, …])`` phases run as one sandboxed process pipeline, exchanging
+        ``_in`` as JSONL at the seams (the ② cut-and-materialize bridge,
+        docs/works/pipeline-runtime-optimize.md §2)."""
+        _check_ds("ds_start", ds_start)
+        _check_ds("ds_end", ds_end)
+
+        def _do(conn) -> list[dict]:
+            self._install_views(conn, ds_start, ds_end)
+            rows: list[dict] | None = None
+            for idx, phase in enumerate(phases):
+                last = idx == len(phases) - 1
+                if phase[0] == "duck":
+                    _, sql, params = phase
+                    try:
+                        stmts = conn.extract_statements(sql)
+                        if len(stmts) != 1 or stmts[0].type != duckdb.StatementType.SELECT:
+                            raise ReadOnlyError("query is read-only (must be a SELECT)")
+                        cur = conn.execute(sql, list(params))
+                        names = [d[0] for d in cur.description]
+                        rows = [dict(zip(names, r)) for r in cur.fetchall()]
+                    except duckdb.Error as e:
+                        raise QueryError(str(e)) from e
+                else:
+                    _, argvs = phase
+                    out = _run_bash_chain(argvs, _rows_to_jsonl(rows or []), exec_timeout)
+                    if last:
+                        rows = _jsonl_to_rows(out)
+                    else:
+                        self._load_bridge(conn, out)     # next duck run reads _bridge
+            return rows or []
+
+        return await self._reads.run(_do)
+
+    def _load_bridge(self, conn, jsonl: bytes) -> None:
+        """Materialize a bash phase's stdout as the ``_bridge`` temp table (the
+        next duck run's first ``_in``), with types inferred by read_json."""
+        import tempfile as _tf
+        if not jsonl.strip():
+            conn.execute("CREATE OR REPLACE TEMP TABLE _bridge AS SELECT 1 AS _empty WHERE false")
+            return
+        with _tf.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            f.write(jsonl)
+            path = f.name
+        try:
+            conn.execute(
+                f"CREATE OR REPLACE TEMP TABLE _bridge AS "
+                f"SELECT * FROM read_json_auto('{path}', format='newline_delimited')")
+        except duckdb.Error as e:
+            raise QueryError(f"bash stage output is not valid JSONL: {e}") from e
+        finally:
+            Path(path).unlink(missing_ok=True)
+
     # ─── write primitives (orchestrated by write_service / admin_service) ─
 
-    async def validate(self, table: str, rows: list[dict]) -> list[dict]:
+    async def validate(self, table: str, rows: list[dict], *,
+                       skip_existing: bool = False) -> list[dict]:
         """Validate rows for insert — unknown columns + write-once primary key
         (intra-batch and against existing rows) — and return the normalized
-        records (business columns only). The PRIMARY KEY constraint backstops
-        the dup check if two inserts race past it."""
+        records (business columns only). With ``skip_existing`` (the idempotent
+        streaming sink, docs/works/pipeline-streaming.md §7), duplicate keys are
+        silently *dropped* instead of raising: replayed at-least-once batches
+        dedupe here. The PRIMARY KEY constraint backstops the dup check if two
+        inserts race past it."""
         spec = self._schema.table(table)
         records: list[dict] = []
         for row in rows:
@@ -394,6 +538,17 @@ class StoreService:
                 raise QueryError(f"{table}: unknown column(s) {sorted(unknown)}")
             records.append({c: row.get(c) for c in spec.column_names})
         keys = [str(r[spec.primary_key]) for r in records]
+        if skip_existing:
+            seen: set[str] = set()
+            dedup = []
+            for r in records:
+                k = str(r[spec.primary_key])
+                if k not in seen:
+                    seen.add(k)
+                    dedup.append(r)
+            existing = set(await self._existing_keys(table, [str(r[spec.primary_key])
+                                                            for r in dedup]))
+            return [r for r in dedup if str(r[spec.primary_key]) not in existing]
         if len(set(keys)) != len(keys):
             raise QueryError(f"{table}: duplicate primary key within the insert batch")
         existing = await self._existing_keys(table, keys)

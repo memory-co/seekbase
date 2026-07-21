@@ -55,5 +55,11 @@ class QueryError(SeekbaseError):
     """Malformed query — unknown table/column, or an unsupported operator."""
 
 
+class PermissionDenied(SeekbaseError):
+    """An operator's capabilities fall outside the active policy — refused at
+    compile time, before the pipeline starts (capability × policy,
+    docs/works/operator-registry.md §6)."""
+
+
 class NotFound(SeekbaseError):
     """A ticket (or other addressed object) does not exist. Maps to 404."""

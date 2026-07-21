@@ -5,14 +5,18 @@ token*: a hit in the operator registry → that operator; a miss → the whole
 segment is one DuckDB SQL statement. **SQL is first-class and the default** —
 "unknown operator" does not exist (docs/works/pipeline-as-anything.md §6).
 
-The pipeline is not executed by seekbase: it is *compiled* into one DuckDB
-``WITH`` chain and handed to the store (docs/works/pipeline-runtime-optimize.md).
-Every stage becomes a CTE ``_s<i>``; a SQL segment references the previous
-stage as ``_in`` (bound via a nested CTE), so DuckDB's optimizer sees the whole
-chain and a pure-SQL query (zero pipes) bypasses compilation entirely.
+The pipeline is not executed by seekbase: it is *compiled* onto the pipeline
+runtimes (docs/works/pipeline-runtime-optimize.md). Each segment is assigned a
+runtime by what it implements (SQL / ``optimize_duck`` → duck;
+``optimize_bash`` → bash), contiguous same-runtime segments **fuse** — duck
+runs into one ``WITH`` chain, bash runs into one process pipeline — and the
+remaining seams are the real runtime switch points, bridged by materializing
+``_in`` as JSONL (the ② 切段 path; the ③ inline-bridge/vtab is a future
+optimization). A pure-SQL query (zero pipes) bypasses compilation entirely.
 
-M1 scope: the duck runtime only. Operators must lower natively
-(``optimize_duck``); the bash runtime / materialized ``run_*`` bridges are M2.
+Authorization is compile-time: every operator segment's ``caps`` are checked
+against the active :class:`Policy` before anything runs — ``sh`` under the
+default ``read-only`` policy is refused before the pipeline starts.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ import re
 from .._types import QueryError
 from ..operator import OperatorCtx, Registry, builtin_operators
 from ..operator.base import split_args
+from ..operator.policy import Policy
 
 __all__ = ["PipelineService", "split_pipeline"]
 
@@ -85,13 +90,15 @@ def _count_placeholders(sql: str) -> int:
 
 
 class PipelineService:
-    """Parse → prepare → lower → hand one SQL to the store. Replaces the old
-    ReadService (regex ``search()`` rewrite + stitch — retired)."""
+    """Parse → authorize → assign runtimes → fuse → hand the plan to the store.
+    Replaces the old ReadService (regex ``search()`` rewrite — retired)."""
 
-    def __init__(self, store, embedding, schema, registry: Registry | None = None) -> None:
+    def __init__(self, store, embedding, schema, registry: Registry | None = None,
+                 policy: Policy | None = None) -> None:
         self._store = store
         self._embedding = embedding
         self._schema = schema
+        self._policy = policy or Policy()
         if registry is None:
             registry = Registry()
             for op in builtin_operators():
@@ -101,6 +108,10 @@ class PipelineService:
     @property
     def registry(self) -> Registry:
         return self._registry
+
+    @property
+    def policy(self) -> Policy:
+        return self._policy
 
     async def query(
         self, sql: str | None, params, ds_start: str | None, ds_end: str | None
@@ -116,8 +127,8 @@ class PipelineService:
             rows = await self._store.run_query(segments[0], list(params), ds_start, ds_end)
             return {"rows": rows}
 
-        final_sql, all_params = await self._compile(segments, list(params), ds_start, ds_end)
-        rows = await self._store.run_query(final_sql, all_params, ds_start, ds_end)
+        phases = await self._compile(segments, list(params), ds_start, ds_end)
+        rows = await self._store.run_plan(phases, ds_start, ds_end, self._policy.exec_timeout)
         return {"rows": rows}
 
     # ─── classification: leading token → operator | None (= SQL) ────────
@@ -126,25 +137,88 @@ class PipelineService:
         m = _LEAD.match(segment)
         return self._registry.resolve(m.group(1)) if m else None
 
-    # ─── lowering: every stage a CTE, `_in` = the previous stage ────────
+    # ─── compile: authorize → assign runtime per segment → fuse runs ────
 
     async def _compile(
         self, segments: list[str], user_params: list, ds_start: str | None, ds_end: str | None
-    ) -> tuple[str, list]:
+    ) -> list[tuple]:
+        """Compile into an execution *plan*: an ordered list of fused phases —
+        ``("duck", sql, params)`` (one WITH chain per contiguous duck run) and
+        ``("bash", [argv, …])`` (one process pipeline per contiguous bash run).
+        Adjacent phases exchange ``_in`` as JSONL (the runtime seam)."""
         ctx = OperatorCtx(
             store=self._store, embedding=self._embedding, schema=self._schema,
             ds_start=ds_start, ds_end=ds_end)
+
+        # 1. classify + authorize + assign a runtime to every segment
+        staged: list[tuple] = []            # ("duck-op"|"duck-sql"|"bash", payload…)
+        for i, seg in enumerate(segments):
+            op = self._classify(seg)
+            if op is None:
+                if ";" in seg:
+                    raise QueryError("a pipeline SQL segment must be a single statement")
+                staged.append(("duck-sql", seg))
+                continue
+            self._policy.check(op)                       # ★ compile-time authorization
+            if not op.bounded:
+                raise QueryError(
+                    f"{op.name} is an unbounded source — it cannot enter a bounded "
+                    f"query (the duck runtime needs a finite relation); use db.stream()")
+            if op.name == "ingest":
+                raise QueryError("ingest is a streaming sink; use db.stream()")
+            m = _LEAD.match(seg)
+            args = op.parse_args(split_args(seg[m.end():]))
+            await op.prepare(args, ctx)
+            if op.has("optimize_duck"):
+                staged.append(("duck-op", op, args))
+            elif op.has("optimize_bash"):
+                if op.is_source():
+                    raise QueryError(f"{op.name} cannot start a bounded query")
+                staged.append(("bash", op, args))
+            else:  # pragma: no cover — registry guarantees ≥1 cell
+                raise QueryError(f"operator {op.name!r} has no runtime implementation")
+
+        # 2. fuse contiguous runs into phases
+        phases: list[tuple] = []
+        i = 0
+        while i < len(staged):
+            kind = staged[i][0]
+            if kind == "bash":
+                argvs = []
+                while i < len(staged) and staged[i][0] == "bash":
+                    _, op, args = staged[i]
+                    argvs.append(op.optimize_bash(args))
+                    i += 1
+                if not phases:
+                    raise QueryError("a bash segment cannot start a bounded query")
+                phases.append(("bash", argvs))
+            else:
+                run = []
+                while i < len(staged) and staged[i][0] != "bash":
+                    run.append(staged[i])
+                    i += 1
+                sql, params, user_params = self._fuse_duck_run(
+                    run, user_params, from_bridge=bool(phases))
+                phases.append(("duck", sql, params))
+
+        if user_params:
+            raise QueryError(f"{len(user_params)} unused query params")
+        return phases
+
+    def _fuse_duck_run(
+        self, run: list[tuple], user_params: list, from_bridge: bool
+    ) -> tuple[str, list, list]:
+        """Fuse one contiguous duck run into a single WITH chain. If the run
+        follows a bash phase, its first ``_in`` is ``_bridge`` (the JSONL the
+        store materializes at the seam)."""
         ctes: list[tuple[str, str]] = []
         all_params: list = []
-        prev: str | None = None
+        prev: str | None = "_bridge" if from_bridge else None
 
-        for i, seg in enumerate(segments):
-            name = f"_s{i}"
-            op = self._classify(seg)
-            if op is not None:
-                m = _LEAD.match(seg)
-                args = op.parse_args(split_args(seg[m.end():]))
-                await op.prepare(args, ctx)
+        for j, item in enumerate(run):
+            name = f"_s{len(ctes)}"
+            if item[0] == "duck-op":
+                _, op, args = item
                 if op.is_source():
                     if prev is not None:
                         raise QueryError(f"{op.name} is a source — it must start the pipeline")
@@ -156,12 +230,11 @@ class PipelineService:
                     body = f"WITH _in AS (SELECT * FROM {prev}) {body}"
                 all_params.extend(op_params)
             else:
-                if ";" in seg:
-                    raise QueryError("a pipeline SQL segment must be a single statement")
+                _, seg = item
                 need = _count_placeholders(seg)
                 if need > len(user_params):
                     raise QueryError(
-                        f"pipeline segment {i} needs {need} params, "
+                        f"pipeline segment needs {need} params, "
                         f"only {len(user_params)} left")
                 all_params.extend(user_params[:need])
                 user_params = user_params[need:]
@@ -169,7 +242,5 @@ class PipelineService:
             ctes.append((name, body))
             prev = name
 
-        if user_params:
-            raise QueryError(f"{len(user_params)} unused query params")
         with_sql = ", ".join(f"{n} AS ({b})" for n, b in ctes)
-        return f"WITH {with_sql} SELECT * FROM {prev}", all_params
+        return f"WITH {with_sql} SELECT * FROM {prev}", all_params, user_params

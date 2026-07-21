@@ -11,6 +11,7 @@ from ._types import (
     Embedder,
     EmbedderInvalid,
     NotFound,
+    PermissionDenied,
     QueryError,
     ReadOnlyError,
     SchemaError,
@@ -18,6 +19,8 @@ from ._types import (
     SeekbaseUnavailable,
 )
 from .client import Seekbase
+from .operator import Cap, Operator
+from .operator.policy import Policy
 from .struct import Hit, Request, Row, Ticket
 
 __version__ = "0.0.1"
@@ -36,5 +39,9 @@ __all__ = [
     "ReadOnlyError",
     "QueryError",
     "NotFound",
+    "PermissionDenied",
+    "Policy",
+    "Operator",
+    "Cap",
     "__version__",
 ]

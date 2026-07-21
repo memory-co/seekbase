@@ -1,6 +1,6 @@
 # pipeline-streaming — 把 bash 管道当简易流框架
 
-> 状态:**设计稿(pipeline 方向,未落)**。这是 [operator-plugin.md §3.3](operator-plugin.md) 延后的「无界流 / `tail -f`」专文。一句话:**我们不造流引擎——bash 管道本身就是一个够用的穷人流框架**。一条 streaming 就是**一根源头无界、常驻不退的 bash 管道**;它的活只有「持续把新数据 ingest 进 DuckDB」,真正的查询/聚合全是 landed 表上的**有界 SQL**(走正常读路径)。**stream 写、query 读,两条路干净分开。**
+> 状态:**已落**(`service/stream_service.py`:`db.stream("watch '<glob>' | … | ingest <表>")`;**一处诚实偏差**——中段进程链是 **batch-scoped**(每微批一条链、EOF 驱动)而非常驻:常驻链会在源和 sink 之间积压不可知的 in-flight 行,使「落库后才提交 offset」无法精确;批作用域换来了严格 at-least-once,常驻链等有行溯源后再做)。这是 [operator-plugin.md §3.3](operator-plugin.md) 延后的「无界流 / `tail -f`」专文。一句话:**我们不造流引擎——bash 管道本身就是一个够用的穷人流框架**。一条 streaming 就是**一根源头无界、常驻不退的 bash 管道**;它的活只有「持续把新数据 ingest 进 DuckDB」,真正的查询/聚合全是 landed 表上的**有界 SQL**(走正常读路径)。**stream 写、query 读,两条路干净分开。**
 >
 > 依赖:[pipeline-runtime-optimize.md](pipeline-runtime-optimize.md)(runtime = duck / bash,有界性)、[operator-plugin.md](operator-plugin.md)(四方法、`run_bash`、`ctx.spawn`)、[concurrency.md](concurrency.md)(WriteService worker / 批处理 / ticket)、[store.md](store.md)(files-first)。
 

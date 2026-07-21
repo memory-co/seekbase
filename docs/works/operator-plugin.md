@@ -1,6 +1,6 @@
 # operator-plugin — 写一个算子:`Operator` 基类的契约与实现
 
-> 状态:**部分已落**(`seekbase/operator/base.py`:`Operator` 基类 + `optimize_duck` 原生降级 + prepare 钩子 + 签名推导 position;`run_duck`/`run_bash`/`optimize_bash` 是留位的契约面,M2)。[operator-registry.md](operator-registry.md) 讲**系统视角**(registry 怎么存、权限怎么判);本文讲**作者视角**:你要给 seekbase 加一个管道算子(`search` 是内建的一个、`grep`/`find`/`sh` 是另几个),得实现一个什么样的 **plugin**?
+> 状态:**大体已落**(`seekbase/operator/base.py`:`Operator` 基类 + `optimize_duck`/`optimize_bash` 两格原生降级 + prepare 钩子 + 签名推导 position + `bounded` 声明;物化 `run_duck`/`run_bash` 仍是留位的契约面——现网算子全部原生降级,没有需要物化格的内建)。[operator-registry.md](operator-registry.md) 讲**系统视角**(registry 怎么存、权限怎么判);本文讲**作者视角**:你要给 seekbase 加一个管道算子(`search` 是内建的一个、`grep`/`find`/`sh` 是另几个),得实现一个什么样的 **plugin**?
 >
 > **一个 plugin = 一个算子(operator)= 一个 `Operator` 子类。** 管道就是一串算子,框架只定**算子基类**,谁都能继承它插进来——`search`、`grep`、`jq` 在基类面前是同一种东西。
 >

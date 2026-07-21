@@ -141,3 +141,63 @@ def test_registry_rejects_operator_without_any_duck_cell():
     r = Registry()
     with pytest.raises(QueryError):
         r.register(Empty())
+
+
+# ─── bash runtime:切段 + JSONL 桥(需 sandboxed 策略)────────────────────
+
+async def _sandboxed_db(tmp_path):
+    from seekbase import Policy, Seekbase
+    from tests.conftest import SCHEMA, FakeEmbedder
+    return await Seekbase.open(tmp_path / "db", schema=SCHEMA, embedder=FakeEmbedder(),
+                               policy=Policy(mode="sandboxed"))
+
+
+async def test_duck_bash_duck_phases(tmp_path):
+    db = await _sandboxed_db(tmp_path)
+    try:
+        await _seed(db)
+        rows = await db.query(
+            "scan cards | sh 'grep tmux' | SELECT count(*) AS c FROM _in")
+        assert rows == [{"c": 2}]                     # c1/c3 contain tmux
+    finally:
+        await db.close()
+
+
+async def test_bash_final_phase(tmp_path):
+    db = await _sandboxed_db(tmp_path)
+    try:
+        await _seed(db)
+        rows = await db.query("scan cards | sh 'grep redis'")
+        assert [r["card_id"] for r in rows] == ["c2"]
+    finally:
+        await db.close()
+
+
+async def test_fused_bash_run_is_one_chain(tmp_path):
+    db = await _sandboxed_db(tmp_path)
+    try:
+        await _seed(db)
+        rows = await db.query(
+            "scan cards | sh 'grep tmux' | sh 'head -1' | SELECT card_id FROM _in")
+        assert len(rows) == 1                          # 两个相邻 bash 段融成一条进程链
+    finally:
+        await db.close()
+
+
+async def test_bash_cannot_start_bounded_query(tmp_path):
+    db = await _sandboxed_db(tmp_path)
+    try:
+        with pytest.raises(QueryError):
+            await db.query("sh 'echo hi' | SELECT 1")
+    finally:
+        await db.close()
+
+
+async def test_bash_failure_surfaces(tmp_path):
+    db = await _sandboxed_db(tmp_path)
+    try:
+        await _seed(db)
+        with pytest.raises(QueryError):
+            await db.query("scan cards | sh 'exit 3'")
+    finally:
+        await db.close()

@@ -60,8 +60,11 @@ class WriteService:
 
     # ─── public: enqueue + await the completion (mode a, synchronous) ──
 
-    async def insert(self, table: str, rows: list[dict]):
-        return await self._submit(("insert", table, list(rows)))
+    async def insert(self, table: str, rows: list[dict], *, skip_existing: bool = False):
+        """``skip_existing`` = the idempotent streaming-sink mode: duplicate
+        primary keys are dropped instead of raising (at-least-once replays
+        dedupe here, docs/works/pipeline-streaming.md §7)."""
+        return await self._submit(("insert", table, list(rows), skip_existing))
 
     async def delete(self, table: str, where: str | None, params):
         if not where:
@@ -119,9 +122,12 @@ class WriteService:
     async def _execute_one(self, op):
         kind = op[0]
         if kind == "insert":
-            _, table, rows = op
-            records = await self._store.validate(table, rows)          # cols + write-once pk
+            _, table, rows, skip_existing = op
+            records = await self._store.validate(
+                table, rows, skip_existing=skip_existing)              # cols + write-once pk
             spec = self._schema.table(table)
+            if not records:                                            # everything deduped away
+                return "insert", {}, None
             vecs, toks = ({}, {})
             if self._embedding is not None:
                 vecs, toks = await self._embedding.embed_records(spec, records)

@@ -17,6 +17,7 @@ from typing import Any
 
 from ._types import Embedder, EmbedderInvalid, QueryError
 from .api.remote import HttpExecutor
+from .operator.policy import Policy
 from .runtime import Bridge
 from .schema import parse_schema
 from .service import EmbeddingService, FileService, StoreService, build_services
@@ -56,8 +57,9 @@ class LocalExecutor:
         raise QueryError(f"unknown op {op!r}")
 
     async def close(self) -> None:
+        await self._svc.stream.close()   # stop resident streams (drain + final checkpoint)
         await self._svc.write.close()    # stop the write worker (drain + join)
-        await self._store.close()        # closes the single DuckDB connection (vss+fts)
+        await self._store.close()        # closes the single DuckDB connection
         self._bridge.close()
 
 
@@ -86,12 +88,19 @@ class Seekbase:
         schema: list,
         embedder: Embedder | None = None,
         search_backend: str = "vss",
+        policy: Policy | None = None,
+        operators: list | None = None,
     ) -> "Seekbase":
         """``search_backend`` picks the retrieval engine behind the pipeline's
         ``search`` source (docs/works/search.md §5): ``"vss"`` (default —
         DuckDB vss+fts in-table, single file, constant fds) or ``"lance"``
         (side LanceDB datasets via the DuckDB lance extension — versioned,
-        per-write fragments; own the fd account)."""
+        per-write fragments; own the fd account).
+
+        ``policy`` bounds what pipeline operators may do (capability × policy,
+        default ``read-only`` — ``sh``/``jq`` refused until you escalate to
+        ``Policy(mode="sandboxed")``). ``operators`` registers custom
+        :class:`~seekbase.Operator` subclasses beside the built-ins."""
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         parsed = parse_schema(schema)
@@ -106,7 +115,8 @@ class Seekbase:
         store = await StoreService.open(
             data_dir, parsed, bridge, dim=dim, search_backend=search_backend)
         files = FileService(bridge, data_dir / "files")
-        services = build_services(store, embedding, files, parsed, bridge, data_dir / "tickets")
+        services = build_services(store, embedding, files, parsed, bridge,
+                                  data_dir / "tickets", policy=policy, operators=operators)
         executor = LocalExecutor(services, store, bridge)
         await executor.start()
         return cls(executor, services)
@@ -162,6 +172,18 @@ class Seekbase:
             if st.state != "pending":
                 return st
             await asyncio.sleep(poll)
+
+    # ─── streaming (embedded-only: resident unbounded pipelines) ───────
+
+    async def stream(self, pipeline: str, *, name: str):
+        """Start a resident streaming pipeline — ``watch '<glob>' | … |
+        ingest <table>`` (docs/works/pipeline-streaming.md). Returns a
+        :class:`StreamHandle` (``await handle.stop()`` to drain and stop).
+        The stream only ingests; query the landed table with normal bounded
+        SQL. Embedded form only."""
+        if self._services is None:
+            raise QueryError("stream() is embedded-only (open(), not connect())")
+        return await self._services.stream.start_stream(pipeline, name=name)
 
     # ─── admin ─────────────────────────────────────────────────────────
 
