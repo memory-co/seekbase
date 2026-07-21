@@ -79,3 +79,10 @@ async def test_denylist_survives_escalation(tmp_path):
             await db.query("scan cards | sh 'cat'")
     finally:
         await db.close()
+
+
+async def test_permission_denied_survives_http(pair):
+    """错误过线保型:server 侧 PermissionDenied → client 侧还是它(403)。"""
+    _, client = pair
+    with pytest.raises(PermissionDenied):
+        await client.query("scan cards | sh 'cat'")

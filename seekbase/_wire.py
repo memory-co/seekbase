@@ -11,6 +11,7 @@ from typing import Any
 from ._types import (
     EmbedderInvalid,
     NotFound,
+    PermissionDenied,
     QueryError,
     ReadOnlyError,
     SchemaError,
@@ -28,6 +29,7 @@ _ERROR_TYPES = {
         ReadOnlyError,
         QueryError,
         NotFound,
+        PermissionDenied,
     )
 }
 
@@ -37,6 +39,8 @@ def status_for(exc: Exception) -> int:
         return 503
     if isinstance(exc, NotFound):
         return 404
+    if isinstance(exc, PermissionDenied):
+        return 403
     if isinstance(exc, SeekbaseError):
         return 400  # ReadOnly / Query / Schema / Embedder / base
     return 500

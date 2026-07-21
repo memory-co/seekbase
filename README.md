@@ -99,7 +99,8 @@ await db.close()
 ## 文档
 
 - [DESIGN.md](DESIGN.md) —— 整体设计
-- [docs/api/](docs/api/) —— API 参考(query / insert / delete / admin / setup,每个接口的请求·响应·错误)
+- [docs/sdk/](docs/sdk/) —— **SDK 参考**(Python 函数调用:open / query 管道 / 写入 / task / stream / Policy / 自定义算子 / Embedder / 错误)
+- [docs/api/](docs/api/) —— HTTP API 参考(query / insert / delete / admin / setup,每个接口的请求·响应·错误)
 - [docs/works/](docs/works/) —— 专题设计。**架构主线**:[pipeline-as-anything.md](docs/works/pipeline-as-anything.md)(SPL 式管道 / SQL 一等公民 / 一切皆表)、[operator-plugin.md](docs/works/operator-plugin.md)(`Operator` 基类:两轴四方法)、[operator-registry.md](docs/works/operator-registry.md)(万物皆注册算子 + 能力×策略限权)、[pipeline-runtime-optimize.md](docs/works/pipeline-runtime-optimize.md)(降级到 runtime / 不自建执行器)。**子系统**:[store.md](docs/works/store.md)(两层存储 files / 派生=结构化 DuckDB+可插拔检索后端)、[search.md](docs/works/search.md)(检索作为 source 段,引擎可插拔 lance/duck-vss)
 
 Apache-2.0。

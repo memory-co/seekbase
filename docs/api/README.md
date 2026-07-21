@@ -1,5 +1,6 @@
 # API 参考
 
+> 函数调用形态(Python SDK)见 [../sdk/](../sdk/);本目录是 HTTP 报文级契约。
 seekbase 的本地 API,所有接口收发 JSON。**读写都同步**:
 
 - **读**:`POST /v1/query` 传一段 SQL(语义检索 `search()` 与时间窗 `ds_start`/`ds_end` 都在这一个接口里),同步返回行。
