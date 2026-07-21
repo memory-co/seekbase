@@ -4,7 +4,8 @@ Two forms, one surface:
 - ``await Seekbase.open(data_dir, schema=…, embedder=…)`` — embedded (DuckDB).
 - ``await Seekbase.connect(url, …)`` — remote (HTTP to a seekbase server).
 
-Read is one SQL interface (``query``, with the ds time window); writes are
+Read is one pipeline interface (``query`` — SQL by default, operator
+segments via ``|``, with the ds time window); writes are
 async (``insert`` / ``delete`` return a ticket, poll via ``write_status`` /
 ``wait``). See docs/api/.
 """
@@ -121,8 +122,10 @@ class Seekbase:
         ds_start: str | None = None,
         ds_end: str | None = None,
     ) -> list[Row]:
-        """Read-only SQL. ``search('…')`` semantic filtering (M3) and the
-        ``ds_start``/``ds_end`` time window live here (see docs/api/query.md)."""
+        """Read-only pipeline query. Pure SQL runs as-is (zero pipes); a
+        ``search <table> 'text' | SELECT … FROM _in`` pipeline compiles into one
+        WITH SQL. The ``ds_start``/``ds_end`` time window applies to the whole
+        pipeline, search candidates included (see docs/api/query.md)."""
         res = await self._exec.execute(Request(
             op="query", sql=sql, params=tuple(params or ()),
             ds_start=ds_start, ds_end=ds_end,

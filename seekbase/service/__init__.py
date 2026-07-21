@@ -6,9 +6,9 @@
     file_service.py       FileService      — canonical file mirror: record/tombstone shapes
 
   use-case services (thin orchestrators: order + policy only)
-    read_service.py     ReadService    — read: rewrite → embed → store.hybrid → store query
-    write_service.py    WriteService   — insert / delete via one worker; owns the ticket log
-    admin_service.py    AdminService   — rebuild: replay the file mirror into the store
+    pipeline_service.py PipelineService — read: SPL pipeline compiler (segments → one WITH SQL)
+    write_service.py    WriteService    — insert / delete via one worker; owns the ticket log
+    admin_service.py    AdminService    — rebuild: replay the file mirror into the store
 
 The **ticket** concept lives inside WriteService (issue / status / append are its
 methods — no standalone TicketService); admin issues its rebuild ticket via it.
@@ -22,14 +22,14 @@ from dataclasses import dataclass
 from .admin_service import AdminService
 from .embedding_service import EmbeddingService
 from .file_service import FileService
-from .read_service import ReadService
+from .pipeline_service import PipelineService
 from .store_service import StoreService
 from .write_service import WriteService
 
 
 @dataclass(frozen=True)
 class Services:
-    read: ReadService
+    read: PipelineService
     write: WriteService
     admin: AdminService
 
@@ -37,7 +37,7 @@ class Services:
 def build_services(store, embedding, files, schema, bridge, tickets_dir) -> Services:
     write = WriteService(store, embedding, files, schema, bridge, tickets_dir)
     return Services(
-        read=ReadService(store, embedding, schema),
+        read=PipelineService(store, embedding, schema),
         write=write,
         admin=AdminService(store, embedding, files, schema, write),   # rebuild → write.issue
     )
@@ -46,5 +46,5 @@ def build_services(store, embedding, files, schema, bridge, tickets_dir) -> Serv
 __all__ = [
     "Services", "build_services",
     "StoreService", "EmbeddingService", "FileService",
-    "ReadService", "WriteService", "AdminService",
+    "PipelineService", "WriteService", "AdminService",
 ]

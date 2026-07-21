@@ -114,23 +114,23 @@ async def test_full_local_journey(tmp_path, monkeypatch):
             "SELECT count(*) AS c FROM notes WHERE id IN (?, ?)", params=["n01", "n11"])
         assert picked["c"] == 2
 
-        # ── 5. 中文语义检索:search() 把想要的那条捞出来 ────────────────
+        # ── 5. 中文语义检索:search 管道段把想要的那条捞出来 ────────────
         hits = await db.query(
-            "SELECT id, _score FROM notes WHERE search(body, '缓存淘汰策略') ORDER BY _score DESC")
+            "search notes '缓存淘汰策略' --col body | SELECT id, _score FROM _in ORDER BY _score DESC")
         assert hits[0]["id"] == "n01"                 # BM25(jieba)精确命中 → 排第一
         assert all(h["_score"] is not None for h in hits)
 
         term = await db.query(
-            "SELECT id FROM notes WHERE search(body, '终端复用器') ORDER BY _score DESC LIMIT 3")
+            "search notes '终端复用器' --col body | SELECT id FROM _in ORDER BY _score DESC LIMIT 3")
         assert _ids(term)[0] in {"n06", "n07"}        # 终端复用器的两条之一居首
 
         vec = await db.query(
-            "SELECT id FROM notes WHERE search(body, '向量近邻检索') ORDER BY _score DESC LIMIT 3")
+            "search notes '向量近邻检索' --col body | SELECT id FROM _in ORDER BY _score DESC LIMIT 3")
         assert _ids(vec)[0] in {"n11", "n12"}
 
-        # 检索 + 结构化过滤同一句
+        # 检索 + 结构化过滤:接缝后一整条 SQL 干完
         fts = await db.query(
-            "SELECT id FROM notes WHERE search(body, '中文分词') AND topic = 'fts'")
+            "search notes '中文分词' --col body | SELECT id FROM _in WHERE topic = 'fts'")
         assert fts and "n21" in _ids(fts)
 
         # ── 6. 时光机:按历史 ds 回溯,看到当时的世界 ───────────────────
@@ -145,14 +145,14 @@ async def test_full_local_journey(tmp_path, monkeypatch):
         assert await count_asof(ds_end="20990101") == 29    # 含“今天”那批
         assert await count_asof(ds_start="20990101") == 0    # 未来起点 → 空
 
-        # 回溯已删除的历史行:n03 于 20260104 被删。search() 尊重 ds 窗口,和结构化
-        # 查询共用同一可见性谓词——回到它还活着的 day03 能搜到,as-of now 搜不到。
+        # 回溯已删除的历史行:n03 于 20260104 被删。search 源段尊重 ds 窗口,和
+        # 结构化查询共用同一可见性谓词——回到它还活着的 day03 能搜到,as-of now 搜不到。
         past = await db.query(
-            "SELECT id FROM notes WHERE search(body, '缓存穿透') ORDER BY _score DESC",
+            "search notes '缓存穿透' --col body | SELECT id FROM _in ORDER BY _score DESC",
             ds_end="20260103")
         assert "n03" in _ids(past)                     # day03:历史里它还活着,可检索
         now_hit = await db.query(
-            "SELECT id FROM notes WHERE search(body, '缓存穿透') ORDER BY _score DESC")
+            "search notes '缓存穿透' --col body | SELECT id FROM _in ORDER BY _score DESC")
         assert "n03" not in _ids(now_hit)              # 现在已软删,search 检索不到
 
         # ── 7. 重开:数据落盘,持久化跨进程 ─────────────────────────────
@@ -161,7 +161,7 @@ async def test_full_local_journey(tmp_path, monkeypatch):
         (again,) = await db.query("SELECT count(*) AS c FROM notes")
         assert again["c"] == 29
         reopened = await db.query(
-            "SELECT id FROM notes WHERE search(body, '缓存淘汰策略') ORDER BY _score DESC LIMIT 1")
+            "search notes '缓存淘汰策略' --col body | SELECT id FROM _in ORDER BY _score DESC LIMIT 1")
         assert reopened[0]["id"] == "n01"              # 重开后 search 仍工作
 
         # ── 8. rebuild:清空派生索引、重放文件镜像,ds 保真、search 复活 ──
@@ -170,7 +170,7 @@ async def test_full_local_journey(tmp_path, monkeypatch):
         assert rebuilt["c"] == 29
         assert await count_asof(ds_end="20260101") == 12   # 历史 ds 经镜像重放不丢
         revived = await db.query(
-            "SELECT id FROM notes WHERE search(body, '向量近邻检索') ORDER BY _score DESC LIMIT 3")
+            "search notes '向量近邻检索' --col body | SELECT id FROM _in ORDER BY _score DESC LIMIT 3")
         assert _ids(revived)[0] in {"n11", "n12"}
 
         # ── 9. 写一次性:主键写死,重插既有 id 被拒 ─────────────────────

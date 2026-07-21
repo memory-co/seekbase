@@ -5,10 +5,11 @@ with business columns + metadata (ds / created_at / deleted_ds / deleted_at) +,
 per searchable column, ``_vec_<col>`` (HNSW) and ``_tok_<col>`` (BM25). The
 primary key is write-once. It owns structured validation (unknown columns,
 dup-pk), the row primitives (``commit_rows`` / ``match_live`` / ``soft_delete``
-/ ``clear``) and read (``run_query`` — read-only guard + visibility view +
-search-score joins) and the vss+fts indexes on those same tables — one
-DuckDB engine, one connection: ``commit_rows`` refreshes the touched FTS index
-in the same block; ``hybrid`` runs the RRF query (given a precomputed vector).
+/ ``clear``) and read (``run_query`` — read-only guard + visibility views)
+and the vss+fts indexes on those same tables — one DuckDB engine, one
+connection: ``commit_rows`` refreshes the touched FTS index in the same block;
+``search_cte`` is the SQL knowledge behind the pipeline's ``search`` source
+(RRF over a precomputed query vector, lowered as one CTE body).
 
 The use-case services sequence StoreService with FileService and
 EmbeddingService (which turns text into the vectors/tokens the store persists).
@@ -153,18 +154,18 @@ class StoreService:
         if spec.searchable:
             self._build_fts(spec)
 
-    async def hybrid(self, table: str, col: str, qvec: list[float], qtok: str,
-                     k: int = _SEARCH_K, ds_start: str | None = None,
-                     ds_end: str | None = None) -> list[tuple[str, float]]:
-        """Fuse vss (cosine ANN over ``qvec``) + fts (BM25 over ``qtok``) by RRF
-        (k0=60) on the given column. The query vector/tokens are precomputed by
-        EmbeddingService; this is pure DuckDB.
+    def search_cte(self, table: str, col: str, k: int = _SEARCH_K,
+                   ds_start: str | None = None, ds_end: str | None = None) -> str:
+        """The ``search`` source stage's duck lowering: one SQL (a CTE body)
+        fusing vss (cosine ANN) + fts (BM25) by RRF (k0=60) on ``col``, joined
+        back to the table's visible columns and emitting them plus ``_score``.
+        Takes 3 positional params: [qvec, qtok, qtok].
 
         Both arms filter by the *same* as-of predicate as the structured read
-        (``_asof_conds``), so search and query agree on what's alive as-of D. The
-        HNSW/BM25 filter is applied *after* each arm's top-k, so a live-as-of-D
-        row can be crowded out by now-live-but-not-then rows; on the historical
-        path the candidate pool is widened ``_OVERFETCH``× to counter that."""
+        (``_asof_conds``), so search and query agree on what's alive as-of D.
+        The HNSW/BM25 filter is applied *after* each arm's top-k, so a
+        live-as-of-D row can be crowded out by now-live-but-not-then rows; on
+        the historical path the candidate pool is widened ``_OVERFETCH``×."""
         spec = self._schema.table(table)
         phys = f"_sb_{table}"
         pk = spec.primary_key
@@ -172,24 +173,25 @@ class StoreService:
         vc, tc = veccol(col), tokcol(col)
         vis = " AND ".join(_asof_conds(ds_start, ds_end))
         cand = k * _OVERFETCH if ds_end is not None else k       # now-path unchanged
-        sql = (
-            f'WITH v AS (SELECT pk, row_number() OVER (ORDER BY dd) rk FROM '
+        return (
+            f'WITH _v AS (SELECT pk, row_number() OVER (ORDER BY dd) rk FROM '
             f'(SELECT "{pk}" pk, array_cosine_distance("{vc}", ?::FLOAT[{self._dim}]) dd '
             f'FROM "{phys}" WHERE "{vc}" IS NOT NULL AND {vis} '
             f'ORDER BY dd LIMIT {cand})), '
-            f"ff AS (SELECT pk, row_number() OVER (ORDER BY sc DESC) rk FROM "
+            f"_f AS (SELECT pk, row_number() OVER (ORDER BY sc DESC) rk FROM "
             f"(SELECT \"{pk}\" pk, {f}.match_bm25(\"{pk}\", ?, fields := '{tc}') sc "
             f'FROM "{phys}" WHERE {f}.match_bm25("{pk}", ?, fields := \'{tc}\') IS NOT NULL '
-            f'AND {vis} ORDER BY sc DESC LIMIT {cand})) '
-            f"SELECT COALESCE(v.pk, ff.pk) pk, "
-            f"COALESCE(1.0/(60+v.rk),0)+COALESCE(1.0/(60+ff.rk),0) score "
-            f"FROM v FULL OUTER JOIN ff ON v.pk=ff.pk ORDER BY score DESC LIMIT {k}")
+            f'AND {vis} ORDER BY sc DESC LIMIT {cand})), '
+            f"_h AS (SELECT COALESCE(_v.pk, _f.pk) pk, "
+            f"COALESCE(1.0/(60+_v.rk),0)+COALESCE(1.0/(60+_f.rk),0) score "
+            f"FROM _v FULL OUTER JOIN _f ON _v.pk=_f.pk ORDER BY score DESC LIMIT {k}) "
+            f'SELECT base.*, _h.score AS _score '
+            f"FROM ({self._visible(spec, ds_start, ds_end)}) base "
+            f'JOIN _h ON CAST(base.{_ident(pk)} AS VARCHAR) = CAST(_h.pk AS VARCHAR)')
 
-        def _do():
-            return self._conn.execute(sql, [qvec, qtok, qtok]).fetchall()
-
-        rows = await self._bridge.run(_do)
-        return [(str(pk_), float(sc)) for pk_, sc in rows]
+    def visible_sql(self, table: str, ds_start: str | None, ds_end: str | None) -> str:
+        """The table's visibility view SQL (the ``scan`` source's duck lowering)."""
+        return self._visible(self._schema.table(table), ds_start, ds_end)
 
     # ─── per-request visibility view (time machine = ds filter) ────────
 
@@ -198,32 +200,11 @@ class StoreService:
         conds = _asof_conds(ds_start, ds_end)
         return f"SELECT {cols} FROM {_phys(spec.name)} WHERE {' AND '.join(conds)}"
 
-    def _install_views(
-        self, conn, ds_start: str | None, ds_end: str | None, searches: list | None = None
-    ) -> None:
-        searches = searches or []
-        by_table: dict[str, list[tuple[str, str]]] = {}
-        for table, name, tmp in searches:
-            by_table.setdefault(table, []).append((name, tmp))
-        single = len(searches) == 1
-
+    def _install_views(self, conn, ds_start: str | None, ds_end: str | None) -> None:
         for spec in self._schema.tables:
-            base = self._visible(spec, ds_start, ds_end)
-            ts = by_table.get(spec.name, [])
-            if ts:
-                pk = _ident(spec.primary_key)
-                joins, scores = [], []
-                for i, (name, tmp) in enumerate(ts):
-                    a = f"_s{i}"
-                    joins.append(
-                        f'LEFT JOIN {_ident(tmp)} {a} ON CAST(base.{pk} AS VARCHAR) = {a}.pk')
-                    scores.append(f"{a}.score AS {_ident(name)}")
-                    if single:
-                        scores.append(f"{a}.score AS _score")
-                body = f"SELECT base.*, {', '.join(scores)} FROM ({base}) base {' '.join(joins)}"
-            else:
-                body = base
-            conn.execute(f"CREATE OR REPLACE TEMP VIEW {_ident(spec.name)} AS {body}")
+            conn.execute(
+                f"CREATE OR REPLACE TEMP VIEW {_ident(spec.name)} AS "
+                f"{self._visible(spec, ds_start, ds_end)}")
 
     # ─── read (on the ReadPool: a cursor, concurrent, off the write bridge) ─
 
@@ -233,7 +214,6 @@ class StoreService:
         params: list[Any],
         ds_start: str | None,
         ds_end: str | None,
-        searches: list[tuple[str, str, list[tuple[str, float]]]] | None = None,
     ) -> list[dict]:
         _check_ds("ds_start", ds_start)
         _check_ds("ds_end", ds_end)
@@ -248,17 +228,7 @@ class StoreService:
             if stmts[0].type != duckdb.StatementType.SELECT:
                 raise ReadOnlyError("query is read-only (must be a SELECT)")
             try:
-                view_searches = []
-                for i, (table, name, results) in enumerate(searches or []):
-                    tmp = f"_sb_s_{i}"
-                    conn.execute(
-                        f"CREATE OR REPLACE TEMP TABLE {_ident(tmp)} (pk VARCHAR, score DOUBLE)")
-                    if results:
-                        conn.executemany(
-                            f"INSERT INTO {_ident(tmp)} VALUES (?, ?)",
-                            [[p, sc] for p, sc in results])
-                    view_searches.append((table, name, tmp))
-                self._install_views(conn, ds_start, ds_end, view_searches)
+                self._install_views(conn, ds_start, ds_end)
                 cur = conn.execute(sql, list(params))
                 names = [d[0] for d in cur.description]
                 return [dict(zip(names, row)) for row in cur.fetchall()]
@@ -349,7 +319,7 @@ class StoreService:
 
         def _do() -> list:
             try:
-                self._install_views(self._conn, None, None, None)   # current live state
+                self._install_views(self._conn, None, None)   # current live state
                 cur = self._conn.execute(
                     f"SELECT {_ident(pk)} FROM {_ident(table)} WHERE ({stmt})", list(params))
                 return [r[0] for r in cur.fetchall()]

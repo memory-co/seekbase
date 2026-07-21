@@ -1,8 +1,11 @@
-"""POST /v1/query — read: run a SQL SELECT (+ ds time window) → ``{"rows": […]}``.
+"""POST /v1/query — read: run a pipeline (SQL by default, + ds time window)
+→ ``{"rows": […]}``.
 
-``search(col, 'text')`` and the ``ds_start`` / ``ds_end`` time machine live in
-this one read endpoint. Read-only: non-SELECT → ``ReadOnlyError``.
-See docs/api/query.md.
+A query is ``stage | stage``: a segment whose leading token hits the operator
+registry (``search``/``scan``/``grep``) is that operator, anything else is one
+DuckDB SQL statement; a pure SQL query has zero pipes. The ``ds_start`` /
+``ds_end`` time machine applies to the whole pipeline (search candidates
+included). Read-only: non-SELECT → ``ReadOnlyError``. See docs/api/query.md.
 """
 from __future__ import annotations
 

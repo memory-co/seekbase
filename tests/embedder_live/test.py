@@ -48,9 +48,8 @@ async def test_live_embedder_semantic_search(tmp_path):
 
         # a query semantically close to c1 (never lexically identical)
         hits = await db.query(
-            "SELECT id, _score FROM cards "
-            "WHERE search(issue, 'splitting my terminal into panes and windows') "
-            "ORDER BY _score DESC LIMIT 3")
+            "search cards 'splitting my terminal into panes and windows' "
+            "| SELECT id, _score FROM _in ORDER BY _score DESC LIMIT 3")
         assert hits, "real embedder returned no hits"
         assert hits[0]["id"] == "c1", f"expected c1 top, got {[h['id'] for h in hits]}"
         # scores are real cosine-derived, descending
