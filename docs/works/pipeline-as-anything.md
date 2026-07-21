@@ -36,7 +36,7 @@ search cards "pty 终端"                             │ source:LanceDB hybrid 
 
 只要一个东西**能吃一张表、能吐一张表**,它就能当 stage 挂进管道。搜索、SQL、shell、HTTP —— 在这条铁律下是**同一种公民**。这就是 "pipeline as anything"。
 
-> **source/transform/external/sink 是描述性角色,不是声明的类型**。除 transform(= SQL 缺省,§2.1)外,一个算子**只声明它收/吐什么格式**(`accepts`/`emits`);是不是 source(无输入)、sink(终端输出)由格式**推导**出来,不用手贴 `kind` 标签。完整的格式契约(以及为什么不要 `kind`)见 [operator-plugin.md §8](operator-plugin.md)。
+> **source/transform/external/sink 是描述性角色,不是声明的类型**。除 transform(= SQL 缺省,§2.1)外,一个算子**什么都不声明**——不声明格式(格式是 runtime 的介质:duck=table、bash=字节流),也不声明角色;是不是 source(不吃上游)、sink(无下游)由**执行方法的签名**推导。完整规则(为什么不要 `kind`、也不要 `accepts`/`emits`)见 [operator-plugin.md §8](operator-plugin.md)。
 
 ### 2.1 「一切皆表」不等于「一切都切成段」
 
