@@ -2,7 +2,7 @@
 
 > 状态:**设计稿(未落)**。一个和现状不同方向的推演:不再把 `search()` 做成内嵌 SQL 的 UDF,而是把 **query 本身变成一串管道**——`stage | stage | stage`,每个 stage 都是「吃一张表、吐一张表」的算子。搜索只是其中一个 **source 算子**(用 LanceDB 搜出来 → 物化成结果表 → 交给 DuckDB 的 `SELECT` 去查);同一根管道里还能串 `bash`、HTTP、embed 等任意算子。于是 seekbase 的 query 就成了一种 **SPL(Splunk 式 search processing language)**:检索是管道的一段,不是 SQL 里的一个函数。
 >
-> 本文只推演设计,不描述已落代码。对照:现状把 `search()` 做成 SQL 一等算子、单引擎 DuckDB,见 [search.md](search.md);那条路的重写/缝合之痛(§3)正是本稿要绕开的东西。
+> 本文只推演设计,不描述已落代码。对照:现状把 `search()` 做成 SQL 一等算子、DuckDB-vss 后端,见 [search.md](search.md);那条路的重写/缝合之痛(本文 §3)正是本稿要绕开的东西。
 
 ## 1. 一句话:query 从「一条 SQL」变成「一串管道」
 
@@ -51,13 +51,13 @@ search cards "pty 终端"                             │ source:LanceDB hybrid 
 
 ## 3. 动因:为什么废掉 `search()` UDF
 
-现状把 `search()` 内嵌进 SQL,代价集中在 search.md §3 那套**重写 + 缝合**:
+现状把 `search()` 内嵌进 SQL,代价集中在 search.md §1 讲的那套**重写 + 缝合**:
 
-| 现状 `search()` UDF 的痛(search.md §3) | 管道模型怎么消掉它 |
+| 现状 `search()` UDF 的痛(search.md §1) | 管道模型怎么消掉它 |
 |---|---|
 | `search(列,'文本')` 不是 DuckDB 函数,query 前要**正则抽取**占位、替换成 `(_score_<列> IS NOT NULL)` | 搜索是**独立 source**,产物是真表;不用把它塞进 SQL,也就不用把它从 SQL 里抠出来 |
 | 抽完要**定表**(`search_target`)、算候选、灌**临时表**、再 `LEFT JOIN` 可见性视图缝回 | source 直接**物化成一张命名表**,下一段 `FROM` 它即可,零缝合 |
-| 正则有边界情况:SQL 注释里的 `search(...)` 误判、`search(列, ?)` 参数绑定不支持(search.md §3.3 实现说明) | 搜索参数是 stage 的**普通参数**(`search cards ?`),天然可绑定;不再从 SQL 文本里抠字面量 |
+| 正则有边界情况:SQL 注释里的 `search(...)` 误判、`search(列, ?)` 参数绑定不支持(search.md §1) | 搜索参数是 stage 的**普通参数**(`search cards ?`),天然可绑定;不再从 SQL 文本里抠字面量 |
 | 多个 `search()` 要各自 `_score_<列>`、同名加后缀去重 | 多次搜索 = 管道里多段 source(或分支),各自成表,不抢命名空间 |
 | 引擎被焊死在 SQL 重写链里,换引擎要动重写层 | 引擎藏在 source stage 背后,可插拔(§8) |
 
@@ -75,10 +75,10 @@ search ─(DuckDB 表 _in)→ [ 一条 SQL over _in ]                           
    └───(Arrow/JSONL over stdin)→ sh 'jq …' ─(stdout→表 _in)→ [ 一条 SQL ]   ← 只有跨进程这一步才序列化
 ```
 
-- **source 的产物也物化成 `_in`**:`search` 把 LanceDB 返回的 `[(pk, score, …)]` 灌进一张 temp 表(就叫 `_in`),下一段照常 `FROM _in`——和 search.md §3.3 的临时表是同一手法,区别是**它现在是管道的正式产物,不是缝进外层 SQL 的旁路**。
+- **source 的产物也物化成 `_in`**:`search` 把 LanceDB 返回的 `[(pk, score, …)]` 灌进一张 temp 表(就叫 `_in`),下一段照常 `FROM _in`——和 search.md §3 命中集物化成表是同一手法,区别是**它现在是管道的正式产物,不是缝进外层 SQL 的旁路**。
 - **表就是 stage 的返回值**:每段执行完把 `_in` 重绑到自己的产物,管道就是「不断重绑 `_in`」的折叠。
 
-> **但这一节描述的是语义,不是实现。** 「一段算完 → 物化 `_in` → 下一段开始」是**模型**;真跑起来时,seekbase **不自己执行管道**——整条被**降级**成 DuckDB 的 `WITH` 链(每段一个 CTE,`_in` = 上一个 CTE 名)或 bash 的 pipeline(`_in` = stdin)。**大多数 `|` 会被编译掉**:同宿主的相邻段之间根本没有物化,DuckDB 优化器还能看穿 CTE 边界做跨段下推(于是 §9 那堵「优化墙」在同宿主内**不存在**)。真正留下的接缝只有**宿主切换点**,由编译器算出来、并按代价挑降级方式(原生翻译 / 切段 / vtab 桥)。见 [pipeline-runtime-optimize.md](pipeline-runtime-optimize.md)。
+> **但这一节描述的是语义,不是实现。** 「一段算完 → 物化 `_in` → 下一段开始」是**模型**;真跑起来时,seekbase **不自己执行管道**——整条被**降级**成 DuckDB 的 `WITH` 链(每段一个 CTE,`_in` = 上一个 CTE 名)或 bash 的 pipeline(`_in` = stdin)。**大多数 `|` 会被编译掉**:同宿主的相邻段之间根本没有物化,DuckDB 优化器还能看穿 CTE 边界做跨段下推(于是 §9 那堵「优化墙」在同宿主内**不存在**)。真正留下的接缝只有**宿主切换点**,由编译器算出来、并按代价挑降级方式(原生翻译 / 切段 / 内联桥)。见 [pipeline-runtime-optimize.md](pipeline-runtime-optimize.md)。
 
 ## 5. 走一遍:两条管道逐段看表的形状
 
@@ -111,7 +111,7 @@ search cards "线上事故"
 管道文法极简:`pipeline := stage ('|' stage)*`。**SQL 是一等公民、也是缺省**:解析一段时只看它的**首 token**——命中 operator registry(见 [operator-registry.md](operator-registry.md))里的算子名(`search`/`scan`/`sh`/`grep`…)→ 走那个算子;**否则整段当一条 DuckDB SQL 执行**。所以算子是「首 token 匹配才走」的特例,SQL 是不匹配时的默认——不存在「未知算子」,不匹配即 SQL。SQL 的引导关键字(`SELECT`/`WITH`/`FROM`)不会和算子名相撞,天然无歧义。编译分工:
 
 - **transform 段就是一条 DuckDB SQL**(over `_in`):原样交给 DuckDB,seekbase **不重写、不拆 verb**。`WHERE`/`ORDER BY`/`LIMIT`/`JOIN`/CTE/窗口全是 SQL 自己的事——管道**不发明** `where|sort|limit` 这种更弱的语法糖去替 SQL(§2.1 禁的就是这个)。管道对这一段的全部职责,就是把 `_in` 递进去。
-- **source 段调引擎**:`search` → `StoreService.hybrid`(或 LanceDB 客户端)→ 物化 `_in`;`scan <表>` → 就是 `_in := <可见性视图>`。
+- **source 段调引擎**:`search` → `SearchService.hybrid`(或 LanceDB 客户端)→ 物化 `_in`;`scan <表>` → 就是 `_in := <可见性视图>`。
 - **算子段起子进程**:`sh` → 序列化 `_in` → `subprocess` → 解析 stdout → 重绑 `_in`。
 
 整条管道编译成一串「对 `_in` 的操作」,**逐段折叠**执行——没有跨全句的 SQL 重写,每段是自洽的小步。对比 search.md §3 的「一条外层 SQL 里塞占位再缝」,这里是「N 段各自成表、顺次接力」。
@@ -126,39 +126,39 @@ scan cards @asof=20260601        ← _in := cards 在 20260601 的存活行(as-o
 ```
 
 - `@asof` 挂在 source 上,决定 `_in` 的初始可见性;后续 transform 段在这张历史表上跑,时光机语义天然继承(它们只看得见 `_in`)。
-- search 作为 source 时,as-of 谓词下推进 LanceDB/vss 候选(和 search.md §4 的 `<可见性谓词>`、over-fetch ×2 同一套逻辑)——**回溯到某天,搜的也是那天的存活集**。语义不变,只是接线从「缝进外层」变成「source 的入参」。
+- search 作为 source 时,as-of 谓词下推进 LanceDB/vss 候选(和 search.md §6 的可见性谓词、over-fetch ×2 同一套逻辑)——**回溯到某天,搜的也是那天的存活集**。语义不变,只是接线从「缝进外层」变成「source 的入参」。
 
-## 8. 搜索引擎可插拔:LanceDB 的回归(诚实讲代价)
+## 8. 搜索引擎可插拔:两个后端的取舍(诚实讲代价)
 
-stage 边界把**引擎**关进了 source 段背后:`search` 的产物只承诺是一张 `(pk, score, …)` 表,**背后是 LanceDB 还是 DuckDB-vss,管道不关心**。这正是本稿敢重新用 LanceDB 的原因——它被隔离在一个 stage 里,不再和结构化 SQL 焊在同一条链上。
+stage 边界把**引擎**关进了 source 段背后:`search` 的产物只承诺是一张 `(pk, score, …)` 表,**背后是 LanceDB 还是 DuckDB-vss,管道不关心**。引擎被隔离在一个 stage 里、不再和结构化 SQL 焊在同一条链上——所以两个后端可以**平级并存**,选哪个是场景问题(见 search.md §5)。
 
-但要**诚实**:search.md §6 收掉 LanceDB 是有原因的——它**版本化、每写生成碎片、每操作开句柄**,在 memory.talk 里反复撞 `Too many open files (EMFILE)`,背了一整套 compaction + 重连的恢复机械。把它作为管道 source 请回来,**那套 fd 代价也一起回来**。取舍要摆明:
+但要**诚实**:LanceDB **版本化、每写生成碎片、每操作开句柄**,在 memory.talk 里反复撞 `Too many open files (EMFILE)`,背一整套 compaction + 重连的恢复机械;DuckDB-vss 单文件、fd 恒定但索引常驻内存。选谁就认谁的账:
 
-| | LanceDB 当 search source | DuckDB-vss 当 search source(现状引擎) |
+| | LanceDB 后端 | DuckDB-vss 后端 |
 |---|---|---|
-| fd | 碎片文件 + 句柄,EMFILE 风险回归,需 compaction/重连机械 | 单文件、fd 恒定(search.md §6) |
-| 隔离 | 关在 stage 背后,不污染结构化侧 | 本来就单引擎 |
+| fd | 碎片文件 + 句柄,EMFILE 风险,需 compaction/重连机械 | 单文件、fd 恒定(search.md §5) |
+| 内存 | 按需 | HNSW 索引常驻 RAM |
 | 段间交换 | 跨引擎,产物要物化成 DuckDB 表(一次拷贝) | 同引擎,temp view 零拷 |
 | 何时值得 | 需要 Lance 的版本化/列存/独立扩缩时 | 写少读多、内存可控的 memory 场景 |
 
-**本稿的立场**:管道**不绑定**任何一个搜索引擎——`search` 是接口,LanceDB 和 DuckDB-vss 都是它的实现。示例用 LanceDB 只为说明「跨引擎 source 也能无缝物化成表」;真要用,先认领 §6 那张表里的 fd 账。
+**本稿的立场**:管道**不绑定**任何一个搜索引擎——`search` 是接口,LanceDB 和 DuckDB-vss 都是它的实现(search.md §5.3 的取舍表)。选 LanceDB 就认领它的 fd 账;选 duck-vss 就认领内存常驻。
 
 ## 9. 代价 / 边界 / 没选的
 
 诚实讲管道模型不是免费的:
 
-- **~~失去全局优化~~(已被后端方案消掉大半)**:曾担心「拆成 N 段 ⇒ 段间是优化墙」。但既然整条管道被**编译成一条 DuckDB `WITH` SQL**([pipeline-runtime-optimize.md](pipeline-runtime-optimize.md)),同宿主的段之间**没有墙**——优化器照常跨 CTE 下推谓词、重排 join。墙只剩在**宿主切换点**(vtab 桥两侧 DuckDB 看不穿)。所以「少制造切换点」= 给算子多写一个 optimize_*,成了这套设计里最值钱的优化动作。
+- **~~失去全局优化~~(已被后端方案消掉大半)**:曾担心「拆成 N 段 ⇒ 段间是优化墙」。但既然整条管道被**编译成一条 DuckDB `WITH` SQL**([pipeline-runtime-optimize.md](pipeline-runtime-optimize.md)),同宿主的段之间**没有墙**——优化器照常跨 CTE 下推谓词、重排 join。墙只剩在**宿主切换点**(内联桥两侧 DuckDB 看不穿)。所以「少制造切换点」= 给算子多写一个 optimize_*,成了这套设计里最值钱的优化动作。
 - **算子段是安全洞**:`sh <任意命令>` = 在 query 里执行 shell。**必须**沙箱 / 命令白名单 / 显式开关,默认关。否则 query 接口等于 RCE。这是 `search()` UDF 从不会有的风险面,管道换来的表达力得用围栏还回去——这道围栏正是 [operator-registry.md](operator-registry.md) 的**能力(capability)× 策略(policy)**机制:默认 `read-only`、`EXEC` 类算子默认关、放行也只在沙箱里跑。
 - **序列化成本**:每进出外部算子一次,表就 marshal 一次(§4)。纯 DuckDB 段之间零拷,但 shell 密集的管道要认这笔账;Arrow IPC 比 JSONL 省,优先它。
 - **没选「管道取代 SQL」**:transform 段**就是** DuckDB SQL,不套 verb 外壳、不拆段(§2.1)。管道只在 **source/external 的接缝**上加一根组合轴,不另造查询语言。能一条 SQL 查完的,就一条 SQL——管道对它**不插手、也不该出现**;它只在 DuckDB 跨不过去的那一刻登场。
 
-**为什么仍值得**:它把 search.md §3 那套「非-SQL 检索硬缝进 SQL」的复杂度**从 SQL 内部搬到 stage 边界**,顺带让 shell / HTTP / embed 变成一等公民——query 从「带一个魔法函数的 SQL」升级成「能串任意算子的 SPL」。检索只是第一个 source;真正的收益是**这根管道后面能挂什么**。
+**为什么仍值得**:它把 search.md §1 那套「非-SQL 检索硬缝进 SQL」的复杂度**从 SQL 内部搬到 stage 边界**,顺带让 shell / HTTP / embed 变成一等公民——query 从「带一个魔法函数的 SQL」升级成「能串任意算子的 SPL」。检索只是第一个 source;真正的收益是**这根管道后面能挂什么**。
 
 ## 10. 与现有架构的接缝(若要落地)
 
-- `ReadService.query`(architecture.md §2)从「rewrite + 单条 SQL 执行」改成一个**纯编译器**:解析 `|` → 给每段指派宿主 → 融合 → 生成一条 DuckDB `WITH` SQL 和/或一条 bash pipeline([pipeline-runtime-optimize.md](pipeline-runtime-optimize.md))。**没有逐段执行器**——执行是宿主的事。
-- rewrite 层(`extract_searches` / `search_target` / 缝合,search.md §3)**整体退休**——不再有 `search()` 要抽。
-- `StoreService.hybrid`(search.md §4)从「被外层 SQL 缝合的旁路」变成「`search` source stage 的引擎后端」,接口不变(吃向量/token,吐 `(pk,score)`),换的是调用位置。
+- `PipelineService.run`(architecture.md §2;现网旧名 `ReadService.query`)从「rewrite + 单条 SQL 执行」改成一个**纯编译器**:解析 `|` → 给每段指派宿主 → 融合 → 生成一条 DuckDB `WITH` SQL 和/或一条 bash pipeline([pipeline-runtime-optimize.md](pipeline-runtime-optimize.md))。**没有逐段执行器**——执行是宿主的事。
+- rewrite 层(`extract_searches` / `search_target` / 缝合,search.md §1)**整体退休**——不再有 `search()` 要抽。
+- `SearchService.hybrid`(search.md §3)从「被外层 SQL 缝合的旁路」变成「`search` source stage 的引擎后端」,接口不变(吃向量/token,吐 `(pk,score)`),换的是调用位置。
 - 新增 **operator registry + 降级后端**(宿主指派、vtab 表函数、subprocess + Arrow/JSONL 编解码)和它的**能力/策略/沙箱围栏**(见 [operator-registry.md](operator-registry.md))。`search` 也注册进这张表——它只是一个 source 算子,不特殊。
 - 两形态(嵌入 / HTTP)接缝不动:管道字符串照样过 `Request`,`LocalExecutor` / `HttpExecutor` 走同一个编译器。
 

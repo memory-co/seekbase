@@ -17,7 +17,7 @@
 
 | 文档 | 主题 |
 |---|---|
-| [architecture.md](architecture.md) | 代码分层与调用链:一切皆 service(领域服务 Store/Search(可插拔后端)/File + 用例服务 Pipeline/Write/Admin)+ api / struct / runtime;读 = `PipelineService` 管道编译(rewrite 层退休),两形态复用同一套 service |
+| [architecture.md](architecture.md) | 代码分层与调用链:一切皆 service(领域服务 Store/Search(可插拔后端)/Embedding/File + 用例服务 Pipeline/Write/Admin)+ api / struct / runtime;读 = `PipelineService` 管道编译(rewrite 层退休),两形态复用同一套 service |
 | [store.md](store.md) | 两层存储(files canonical / 派生 = 结构化 DuckDB + **可插拔检索后端** duck-vss/LanceDB):角色分工、files 布局(按天分区 / 每表 `<表>.jsonl`)、insert 的「文件最先」原子性顺序,以及后续写入出问题时如何用 files 校准 |
 | [search.md](search.md) | 检索 = 管道的一个 **source 段**,引擎**可插拔**(LanceDB / DuckDB-`vss`+`fts`):后端契约、hybrid RRF、jieba 中文分词、两后端的 fd/内存取舍、as-of 下推;`search()` UDF 退休 |
 | [time_machine.md](time_machine.md) | 用 `ds` 分区实现时光机:两对日期字段、可见性谓词、`ds_start`/`ds_end` 语义、写一次(穿越 create/delete)、无物理删(历史永久);as-of 作为 source 段 `@asof` 入参下推进检索候选 |

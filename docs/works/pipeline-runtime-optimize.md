@@ -153,7 +153,7 @@ class Grep(Operator):
 | 落在哪 | bash 宿主的管道头 | `WITH` 链的第一个 CTE |
 | 好在哪 | bash 侧不必为了检索绕回 duck | 检索**进了优化器视野**:下游 `WHERE kind='issue'` / `LIMIT` 有机会下推进检索 |
 
-**两版都有 ⇒ `search` 不挑宿主**,跟着管道其余部分走。`optimize_duck` 那版尤其值:它把 [search.md §4](search.md) 的 over-fetch ×2 从「盲目多取一倍」变成「优化器知道下游要多少」。
+**两版都有 ⇒ `search` 不挑宿主**,跟着管道其余部分走。`optimize_duck` 那版尤其值:它把 [search.md §6](search.md) 的 over-fetch ×2 从「盲目多取一倍」变成「优化器知道下游要多少」。
 
 > **注意这张表里 LanceDB 出现了两次,但它不是 runtime**(§1.1)。两栏是**同一个 LanceDB 后端**在两个不同 runtime 里的两种接法:bash runtime 里当子进程调 SDK,duck runtime 里当表函数走官方集成。runtime 是 duck / bash,LanceDB 始终是 `search` 的内部后端。
 
