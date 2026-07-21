@@ -4,11 +4,12 @@ The directory listing is the API: each ``<name>.py`` declares one ``Endpoint``
 (method + path + async handler) and documents its contract in the module
 docstring; they mirror ``docs/api/*.md`` one-to-one.
 
-  query.py     POST /v1/query            read (SQL + ds window)
+  query.py     POST /v1/query            read (pipeline + ds window; wait_ms → 202 task)
   insert.py    POST /v1/insert           write rows (synchronous)
   delete.py    POST /v1/delete           soft-delete rows
-  writes.py    GET  /v1/writes/{ticket}  poll a write's status
-  rebuild.py   POST /v1/rebuild          admin: replay files → DuckDB
+  tasks.py     GET/POST /v1/tasks…       unified operation handles (list/status/result/cancel)
+  writes.py    GET  /v1/writes/{ticket}  compat alias for /v1/tasks/{id}
+  rebuild.py   POST /v1/rebuild          admin: replay files → DuckDB (a background task)
   health.py    GET  /v1/health           readiness probe
 
 ``server.py`` builds the ASGI app from ``ENDPOINTS`` and dispatches with
@@ -16,13 +17,17 @@ docstring; they mirror ``docs/api/*.md`` one-to-one.
 """
 from __future__ import annotations
 
-from . import delete, health, insert, query, rebuild, writes
+from . import delete, health, insert, query, rebuild, tasks, writes
 from ._route import Endpoint, match_path
 
 ENDPOINTS: list[Endpoint] = [
     query.ENDPOINT,
     insert.ENDPOINT,
     delete.ENDPOINT,
+    tasks.RESULT,          # most-specific task routes first
+    tasks.CANCEL,
+    tasks.STATUS,
+    tasks.LIST,
     writes.ENDPOINT,
     rebuild.ENDPOINT,
     health.ENDPOINT,

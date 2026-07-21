@@ -25,6 +25,7 @@ class ReadPool:
         self._free: queue.Queue = queue.Queue()
         for c in cursors:
             self._free.put(c)
+        self._all = list(cursors)     # held for close-time interrupt (incl. checked-out ones)
         self._pool = pool
         self._closed = False
 
@@ -49,6 +50,14 @@ class ReadPool:
         return await loop.run_in_executor(self._pool, _do)
 
     def close(self) -> None:
+        """Interrupt every cursor first (cross-thread safe in DuckDB), so a
+        runaway query cannot hang shutdown — the read thread gets an
+        InterruptException and returns its cursor; then join the pool."""
         if not self._closed:
             self._closed = True
+            for c in self._all:
+                try:
+                    c.interrupt()
+                except Exception:     # noqa: BLE001 — best-effort, close anyway
+                    pass
             self._pool.shutdown(wait=True)

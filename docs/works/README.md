@@ -23,5 +23,5 @@
 | [search.md](search.md) | 检索 = 管道的一个 **source 段**,引擎**可插拔**(LanceDB / DuckDB-`vss`+`fts`):后端契约、hybrid RRF、jieba 中文分词、两后端的 fd/内存取舍、as-of 下推;`search()` UDF 退休 |
 | [time_machine.md](time_machine.md) | 用 `ds` 分区实现时光机:两对日期字段、可见性谓词、`ds_start`/`ds_end` 语义、写一次(穿越 create/delete)、无物理删(历史永久);as-of 作为 source 段 `@asof` 入参下推进检索候选 |
 | [schema.md](schema.md) | 声明式表结构:一处声明如何推导出 DDL / **可插拔检索后端**派生 / 文件镜像 / 元数据列;`searchable` 接检索后端、`search` 是 source 非函数;类型系统、校验规则、schema 演进 |
-| [ticket.md](ticket.md) | 写回执 / 操作日志(设计):ticket 是同步写的回执(非异步句柄、非提交闸);为什么从内存 dict 换成独立、落盘、状态-only 的按天分区 JSONL 日志;自定位 id、保留清理、JSONL vs DuckDB 取舍 |
+| [task.md](task.md) | 统一操作句柄(**已落**):写=出生即 done 的 task(原 ticket,模式 a 不变、insert 等完才返回)、rebuild=真 pending→done 后台 task、慢查询=显式 `as_task` / **HTTP `wait_ms` 超时 202 收编**(快路零 task 开销);**结果落文件、表只记 query**;tasks 接口可查(list/status/result/cancel);max runtime + 取消(诚实边界:不 interrupt 执行中的 duck 段,close 时 interrupt 兜底);保留 GC |
 | [concurrency.md](concurrency.md) | async 执行 / 读写分离 / 写管道(设计):Bridge 为什么存在(async↔阻塞 DuckDB)、读为何排在写后、读走 cursor+MVCC 拆分(管道 transform 段走读 cursor)、写收敛成一条看得见生命周期的 worker(循环 + ticket)、a 同步 / b 异步、批处理 |

@@ -3,9 +3,9 @@
 Built by the port; run either straight against the services (LocalExecutor) or
 serialized to an HTTP endpoint (HttpExecutor). One shape both forms agree on:
 
-  read:   query
+  read:   query (as_task → a background task id)
   write:  insert / delete
-  poll:   status
+  tasks:  status / tasks / task_result / task_cancel
   admin:  rebuild
 """
 from __future__ import annotations
@@ -25,5 +25,8 @@ class Request:
     table: str | None = None
     rows: tuple[dict, ...] = ()        # insert
     where: str | None = None          # delete
-    # poll / admin
-    ticket: str | None = None         # status
+    # query-as-task
+    as_task: bool = False             # explicit background query (task.md §4)
+    # tasks
+    ticket: str | None = None         # status / task_result / task_cancel: the task id
+    limit: int = 50                   # tasks (list)

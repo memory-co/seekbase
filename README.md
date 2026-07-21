@@ -11,7 +11,7 @@
 
 两种形态的**调用代码逐字节相同**——`query(sql)` / `insert` / `delete` 一个字都不用改,变的只有你怎么拿到 `db` 句柄。
 
-> **状态:核心完整(管道 M1 + 单表同步写)。** 管道 `query`(SQL 缺省 + `search`/`scan`/`grep` 算子段,整条编译成一条 `WITH` SQL;duck runtime)、`ds` 时间窗、同步 ticket 写(`insert`/`delete`,**主键写一次、重复报错**)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、检索后端**可插拔**(`Seekbase.open(search_backend="vss"|"lance")`)、**bash runtime**(`sh`/`jq` 段,默认 `read-only` 策略拒 EXEC、`Policy(mode="sandboxed")` 放行进沙箱)、**流式摄取**(`db.stream("watch '<glob>' | … | ingest <表>")`,at-least-once + 幂等 sink)、两种使用形态,今天都能跑。**delete 只软删 `deleted_ds` 墓碑、历史永久保留,没有物理删/vacuum**。完整设计见 [DESIGN.md](DESIGN.md)。
+> **状态:核心完整(管道 M1 + 单表同步写)。** 管道 `query`(SQL 缺省 + `search`/`scan`/`grep` 算子段,整条编译成一条 `WITH` SQL;duck runtime)、`ds` 时间窗、同步 ticket 写(`insert`/`delete`,**主键写一次、重复报错**)、文件镜像(每表 `<表>.jsonl` + `rebuild`)、检索后端**可插拔**(`Seekbase.open(search_backend="vss"|"lance")`)、**bash runtime**(`sh`/`jq` 段,默认 `read-only` 策略拒 EXEC、`Policy(mode="sandboxed")` 放行进沙箱)、**流式摄取**(`db.stream("watch '<glob>' | … | ingest <表>")`,at-least-once + 幂等 sink)、**统一 task 句柄**(写=出生即 done;rebuild/`as_task` 查询=后台 task;HTTP 慢查询 `wait_ms` 超时自动 202 升级,结果落文件按保留期 GC)、两种使用形态,今天都能跑。**delete 只软删 `deleted_ds` 墓碑、历史永久保留,没有物理删/vacuum**。完整设计见 [DESIGN.md](DESIGN.md)。
 
 > **🚧 剩余优化(设计已定,未落):** ③ 内联桥/vtab(跨 runtime 现走 ② 切段 + JSONL 桥)、runtime 指派最短路(现为退化型)、常驻流中段链(现为 batch-scoped)。旧的 `search()` UDF 语法已退休。
 

@@ -167,7 +167,7 @@ sh 'tail -f app.log' | SELECT count(*) FROM _in
 >
 > 唯一要作者声明的:**只有 bash 宿主的 source 要自报会不会结束**(`sh` 不报就按无界处理——`EXEC` 不可信)。其余算子什么都不用填。
 
-**只借这两样(宿主降级的思路 + 有界性),别的不借。** **watermark / event time** ❌(seekbase 没有乱序事件流)、**checkpoint / exactly-once** ❌(单进程交互式查询,失败就重跑;持久性归写侧的 files-first + ticket,见 [store.md](store.md) / [ticket.md](ticket.md))、**keyed state / state backend** ❌(段间状态就是 `_in` 一张表;常驻资源是 §3.1 的服务句柄,不需要分区/快照/rescale)、**timer** ❌(用 `ctx.deadline`/`ctx.cancelled`)、**分布式 shuffle / 并行度** ❌(单进程;并行度是 **DuckDB 段内部**的事)、**窗口** 🕐 挂起(真出现无界 source 再说,届时按 SQL 的 window 语法接,不另造管道 DSL)。
+**只借这两样(宿主降级的思路 + 有界性),别的不借。** **watermark / event time** ❌(seekbase 没有乱序事件流)、**checkpoint / exactly-once** ❌(单进程交互式查询,失败就重跑;持久性归写侧的 files-first + task 记录,见 [store.md](store.md) / [task.md](task.md))、**keyed state / state backend** ❌(段间状态就是 `_in` 一张表;常驻资源是 §3.1 的服务句柄,不需要分区/快照/rescale)、**timer** ❌(用 `ctx.deadline`/`ctx.cancelled`)、**分布式 shuffle / 并行度** ❌(单进程;并行度是 **DuckDB 段内部**的事)、**窗口** 🕐 挂起(真出现无界 source 再说,届时按 SQL 的 window 语法接,不另造管道 DSL)。
 
 > **澄清:as-of ≠ event time,`ds` ≠ watermark。** 这个类比很诱人但错。[time_machine.md](time_machine.md) 的 `ds` 是**行上的数据属性**,as-of 是一条**普通谓词**,下推进候选就完了;watermark 是「事件时间进展到哪」的**流控信号**,用来触发窗口、判迟到。把 `ds` 当 watermark 会平白引入迟到数据 / allowed lateness / side output 一整套**没有对应问题**的机械。
 >

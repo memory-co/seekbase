@@ -1,7 +1,7 @@
-"""GET /v1/writes/{ticket} — poll a write's status → ``{"ticket", "state", …}``.
+"""GET /v1/writes/{ticket} — compatibility alias for ``/v1/tasks/{id}``.
 
-Writes are synchronous, so a known ticket is always ``done``; an unknown ticket
-→ ``NotFound`` (404). See docs/api/insert.md.
+A ticket is a born-done task (docs/works/task.md §2); this route delegates to
+the shared task log. Unknown id → ``NotFound`` (404). See docs/api/insert.md.
 """
 from __future__ import annotations
 

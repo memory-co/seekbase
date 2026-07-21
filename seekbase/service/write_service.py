@@ -1,5 +1,4 @@
-"""WriteService — the write use cases (insert / delete), with an explicit worker
-and the ticket concept living here (no standalone TicketService).
+"""WriteService — the write use cases (insert / delete), with an explicit worker.
 
 All writes funnel through one visible worker coroutine (``_worker_loop``): a
 caller ``submit``s an op and awaits its completion Future (mode a — synchronous;
@@ -7,42 +6,30 @@ read-your-write holds because the batch's FTS index is rebuilt before the Future
 resolves). The worker drains a **batch** off the queue and rebuilds each touched
 table's FTS **once per batch** (FTS rebuild is O(table size)).
 
-A **ticket** is a write's completion record — issued **last** (after files + db +
-FTS), so a done-ticket means the whole write ran to completion. Tickets are
-appended to a durable, status-only log ``<data_dir>/tickets/ds=YYYYMMDD.jsonl``
-(id embeds the ds so ``status`` goes straight to the partition). See ticket.md.
+A write's completion record is a **born-done task** appended to the shared
+TaskService log **last** (after files + db + FTS), so a done-task means the
+whole write ran to completion — the old ticket, semantics unchanged
+(docs/works/task.md §2).
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
-import os
-import uuid
-from pathlib import Path
 
-from .._types import NotFound, QueryError
+from .._types import QueryError
 from ..runtime import now, today
-from ..struct import Ticket
-
-
-def _new_ticket_id() -> str:
-    return f"wr_{today()}_{uuid.uuid4().hex[:12]}"        # ds-embedded → self-locating
-
-
-def _ds_of(ticket_id: str) -> str | None:
-    parts = ticket_id.split("_")
-    return parts[1] if len(parts) >= 3 and parts[0] == "wr" else None
+from ..struct import Task
+from .task_service import TaskService, _new_task_id
 
 
 class WriteService:
-    def __init__(self, store, embedding, files, schema, bridge, tickets_dir) -> None:
+    def __init__(self, store, embedding, files, schema, bridge, tasks: TaskService) -> None:
         self._store = store
         self._embedding = embedding
         self._files = files
         self._schema = schema
-        self._bridge = bridge                 # ticket-log append/status run here (single writer)
-        self._tickets_dir = Path(tickets_dir)
+        self._bridge = bridge
+        self._tasks = tasks                   # shared task log (writes append born-done)
         self._q: asyncio.Queue = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._stop = False
@@ -112,12 +99,16 @@ class WriteService:
         for t in fts_tables:                      # FTS once per touched table, before resolving
             with contextlib.suppress(Exception):
                 await self._store.rebuild_fts(t)
-        # ticket is the LAST step: a done-ticket ⟹ the whole write completed
-        tickets = [Ticket(id=_new_ticket_id(), op=kind, **extra) for _, kind, extra in executed]
-        await self._append(tickets)
-        for (fut, _, _), ticket in zip(executed, tickets):
+        # the task record is the LAST step: done-task ⟹ the whole write completed
+        ts = now()
+        tasks = [Task(id=_new_task_id(), op=kind, state="done",
+                      submitted_at=ts, finished_at=ts, **extra)
+                 for _, kind, extra in executed]
+        for task in tasks:
+            await self._tasks.append(task)
+        for (fut, _, _), task in zip(executed, tasks):
             if not fut.done():
-                fut.set_result(ticket)
+                fut.set_result(task)
 
     async def _execute_one(self, op):
         kind = op[0]
@@ -145,52 +136,7 @@ class WriteService:
             return "delete", {"matched": len(keys)}, None
         raise QueryError(f"unknown write op {kind!r}")
 
-    # ─── ticket log (durable, status-only, ds-partitioned JSONL) ───────
+    # ─── status: delegated to the shared task log ──────────────────────
 
-    async def issue(self, op: str, *, matched=None, stats=None) -> Ticket:
-        """Issue + log one ticket (used by admin/rebuild, outside the worker)."""
-        t = Ticket(id=_new_ticket_id(), op=op, matched=matched, stats=stats)
-        await self._append([t])
-        return t
-
-    async def status(self, ticket_id: str) -> Ticket:
-        ds = _ds_of(ticket_id)
-        if ds is None:
-            raise NotFound(f"unknown ticket {ticket_id!r}")
-        path = self._tickets_dir / f"ds={ds}.jsonl"
-
-        def _find():
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        d = json.loads(line)
-                        if d.get("ticket") == ticket_id:
-                            return Ticket.from_wire(d)
-            return None
-
-        found = await self._bridge.run(_find)
-        if found is None:
-            raise NotFound(f"unknown ticket {ticket_id!r}")
-        return found
-
-    async def _append(self, tickets: list[Ticket]) -> None:
-        if not tickets:
-            return
-
-        def _do():
-            by_ds: dict[str, list[Ticket]] = {}
-            for t in tickets:
-                by_ds.setdefault(_ds_of(t.id) or today(), []).append(t)
-            for ds, group in by_ds.items():
-                p = self._tickets_dir / f"ds={ds}.jsonl"
-                p.parent.mkdir(parents=True, exist_ok=True)
-                with open(p, "a", encoding="utf-8") as f:
-                    for t in group:
-                        f.write(json.dumps(t.to_wire(), ensure_ascii=False) + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-
-        await self._bridge.run(_do)
+    async def status(self, task_id: str) -> Task:
+        return await self._tasks.status(task_id)

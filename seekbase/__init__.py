@@ -21,7 +21,7 @@ from ._types import (
 from .client import Seekbase
 from .operator import Cap, Operator
 from .operator.policy import Policy
-from .struct import Hit, Request, Row, Ticket
+from .struct import Hit, Request, Row, Task, Ticket
 
 __version__ = "0.0.1"
 
@@ -30,6 +30,7 @@ __all__ = [
     "Embedder",
     "Row",
     "Hit",
+    "Task",
     "Ticket",
     "Request",
     "SeekbaseError",

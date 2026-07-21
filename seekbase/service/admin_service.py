@@ -2,7 +2,12 @@
 
 ``rebuild`` replays the canonical file mirror into the derived DuckDB: read
 every table's put/delete events, re-embed the puts, clear + reload the rows,
-re-apply the soft-deletes, and refresh each table's FTS index once.
+re-apply the soft-deletes, and refresh each table's search index once.
+
+It is the first real pending→done **task** (docs/works/task.md §3): ``rebuild``
+returns immediately with a pending task; the replay runs in the background and
+the task settles to ``done + stats`` (or ``failed + error``). Poll via
+``wait``/``task_status`` exactly like a write.
 """
 from __future__ import annotations
 
@@ -11,14 +16,18 @@ from ..struct import CREATED_AT, DELETED_AT, DS
 
 
 class AdminService:
-    def __init__(self, store, embedding, files, schema, write) -> None:
+    def __init__(self, store, embedding, files, schema, tasks) -> None:
         self._store = store
         self._embedding = embedding
         self._files = files
         self._schema = schema
-        self._write = write               # rebuild's ticket is issued/logged via WriteService
+        self._tasks = tasks               # rebuild = a background task (pending→done)
 
-    async def rebuild(self) -> dict:
+    async def rebuild(self):
+        """Submit the replay as a background task; returns the pending Task."""
+        return await self._tasks.submit("rebuild", self._replay)
+
+    async def _replay(self) -> dict:
         result = {"tables": 0, "rows": 0, "tombstones": 0}
 
         # 1) read events (filesystem) + embed the puts, per table
@@ -59,4 +68,4 @@ class AdminService:
             await self._store.rebuild_fts(spec.name)                       # vss backend
             await self._store.rebuild_search_index(                        # lance backend
                 spec, r["recs"], r["vecs"], r["toks"])
-        return await self._write.issue("rebuild", stats=result)
+        return result                                  # → the task's ``stats``
