@@ -5,11 +5,15 @@ with business columns + metadata (ds / created_at / deleted_ds / deleted_at) +,
 per searchable column, ``_vec_<col>`` (HNSW) and ``_tok_<col>`` (BM25). The
 primary key is write-once. It owns structured validation (unknown columns,
 dup-pk), the row primitives (``commit_rows`` / ``match_live`` / ``soft_delete``
-/ ``clear``) and read (``run_query`` — read-only guard + visibility views)
-and the vss+fts indexes on those same tables — one DuckDB engine, one
-connection: ``commit_rows`` refreshes the touched FTS index in the same block;
-``search_cte`` is the SQL knowledge behind the pipeline's ``search`` source
-(RRF over a precomputed query vector, lowered as one CTE body).
+/ ``clear``) and read (``run_query`` — read-only guard + visibility views),
+plus the **pluggable search backend** (docs/works/search.md): ``vss`` keeps
+vec/tok columns in the duck rows (HNSW + FTS on the tables, refreshed by
+``commit_rows``); ``lance`` keeps them in side LanceDB datasets reached via
+the DuckDB ``lance`` extension (COPY appends + ``lance_*`` table functions) —
+both through this one connection, which is why the backend lives here rather
+than in a separate service. ``search_lower`` is the SQL knowledge behind the
+pipeline's ``search`` source: RRF (k0=60) shared across backends, only the
+candidate arms differ.
 
 The use-case services sequence StoreService with FileService and
 EmbeddingService (which turns text into the vectors/tokens the store persists).
@@ -83,26 +87,51 @@ def _one_statement(sql: str, label: str) -> str:
     return s
 
 
+def _l2_normalize(v: list[float]) -> list[float]:
+    """Unit-normalize, so lance's L2 ``_distance`` ranks identically to the vss
+    backend's cosine (‖a−b‖² = 2−2cosθ on unit vectors — monotonic)."""
+    n = sum(x * x for x in v) ** 0.5
+    return [x / n for x in v] if n else list(v)
+
+
 class StoreService:
-    def __init__(self, bridge: Bridge, conn, schema: Schema, dim: int | None) -> None:
+    def __init__(self, bridge: Bridge, conn, schema: Schema, dim: int | None,
+                 search_backend: str = "vss", lance_dir: Path | None = None) -> None:
         self._bridge = bridge          # single-writer: all writes serialize here
         self._conn = conn
         self._schema = schema
         self._dim = dim               # embedding dim, or None if nothing searchable
+        self._backend = search_backend   # "vss" (in-table) | "lance" (side datasets)
+        self._lance_dir = lance_dir
         self._reads: ReadPool | None = None   # concurrent reads (cursors), off the write bridge
 
     @classmethod
     async def open(
-        cls, data_dir: Path, schema: Schema, bridge: Bridge, dim: int | None = None
+        cls, data_dir: Path, schema: Schema, bridge: Bridge, dim: int | None = None,
+        search_backend: str = "vss",
     ) -> "StoreService":
+        if search_backend not in ("vss", "lance"):
+            raise QueryError(f"unknown search backend {search_backend!r} (vss | lance)")
         data_dir = Path(data_dir)
         conn = await bridge.run(lambda: duckdb.connect(str(data_dir / "duck.db")))
-        engine = cls(bridge, conn, schema, dim)
+        engine = cls(bridge, conn, schema, dim, search_backend, data_dir / "lance")
         await bridge.run(engine._create_tables)
-        if dim is not None:
+        if engine._vss:
             await bridge.run(engine._setup_search)   # vss + fts extensions + indexes
+        elif engine._lance:
+            await bridge.run(engine._setup_lance)    # lance extension + one dataset per table
         engine._reads = await ReadPool.create(bridge, conn)   # read cursors off the write bridge
         return engine
+
+    @property
+    def _vss(self) -> bool:
+        """Search columns live *in* the duck rows (vss + fts on the tables)."""
+        return self._backend == "vss" and self._dim is not None
+
+    @property
+    def _lance(self) -> bool:
+        """Search rows live in side LanceDB datasets (via the duck lance ext)."""
+        return self._backend == "lance" and self._dim is not None
 
     @property
     def schema(self) -> Schema:
@@ -115,7 +144,7 @@ class StoreService:
             defs = [f"{_ident(c.name)} {c.sql_type}" for c in spec.columns]
             defs += [f"{_ident(DS)} VARCHAR", f"{_ident(CREATED_AT)} VARCHAR",
                      f"{_ident(DELETED_DS)} VARCHAR", f"{_ident(DELETED_AT)} VARCHAR"]
-            if self._dim is not None:
+            if self._vss:
                 for col in spec.searchable:
                     defs.append(f"{_ident(veccol(col))} FLOAT[{self._dim}]")
                     defs.append(f"{_ident(tokcol(col))} VARCHAR")
@@ -154,18 +183,107 @@ class StoreService:
         if spec.searchable:
             self._build_fts(spec)
 
-    def search_cte(self, table: str, col: str, k: int = _SEARCH_K,
-                   ds_start: str | None = None, ds_end: str | None = None) -> str:
-        """The ``search`` source stage's duck lowering: one SQL (a CTE body)
-        fusing vss (cosine ANN) + fts (BM25) by RRF (k0=60) on ``col``, joined
-        back to the table's visible columns and emitting them plus ``_score``.
-        Takes 3 positional params: [qvec, qtok, qtok].
+    # ─── LanceDB backend (side datasets, via the DuckDB `lance` extension) ─
+    #
+    # The whole backend goes through the same duck connection: writes are
+    # ``COPY … (FORMAT lance)`` appends, queries are the ``lance_*`` table
+    # functions — no separate SDK/connection. The datasets carry only
+    # (pk, vec/tok per searchable column): visibility (ds/deleted) is applied
+    # by joining hits back to the duck visible view, so soft-deleted rows stay
+    # in the index and the candidate pool is always widened ``_OVERFETCH``×
+    # (the arms cannot pre-filter). Vectors are L2-normalized on both the
+    # index and query side, so lance's L2 ``_distance`` ranks like cosine.
 
-        Both arms filter by the *same* as-of predicate as the structured read
-        (``_asof_conds``), so search and query agree on what's alive as-of D.
-        The HNSW/BM25 filter is applied *after* each arm's top-k, so a
-        live-as-of-D row can be crowded out by now-live-but-not-then rows; on
-        the historical path the candidate pool is widened ``_OVERFETCH``×."""
+    def _lance_ds(self, table: str) -> str:
+        return str(self._lance_dir / f"{table}.lance")
+
+    def _lance_stage_cols(self, spec: TableSpec) -> list[str]:
+        cols = ["pk VARCHAR"]
+        for col in spec.searchable:
+            cols += [f'"vec_{col}" FLOAT[{self._dim}]', f'"tok_{col}" VARCHAR']
+        return cols
+
+    def _setup_lance(self) -> None:
+        try:
+            self._conn.execute("INSTALL lance; LOAD lance;")
+        except Exception:
+            self._conn.execute("LOAD lance;")        # already installed offline
+        self._lance_dir.mkdir(parents=True, exist_ok=True)
+        for spec in self._schema.tables:
+            if spec.searchable and not Path(self._lance_ds(spec.name)).exists():
+                self._lance_write(spec, [], mode="overwrite")   # empty dataset: searchable from day 0
+
+    def _lance_write(self, spec: TableSpec, payload: list[list], mode: str) -> None:
+        """Append/overwrite index rows via a staging temp table + COPY.
+        Runs inside a bridge block (write connection)."""
+        cols = self._lance_stage_cols(spec)
+        self._conn.execute(f"CREATE OR REPLACE TEMP TABLE _lance_stage ({', '.join(cols)})")
+        if payload:
+            ph = ", ".join("?" * len(cols))
+            self._conn.executemany(f"INSERT INTO _lance_stage VALUES ({ph})", payload)
+        self._conn.execute(
+            f"COPY (SELECT * FROM _lance_stage) TO '{self._lance_ds(spec.name)}' "
+            f"(FORMAT lance, mode '{mode}')")
+        self._conn.execute("DROP TABLE _lance_stage")
+
+    def _lance_payload(self, spec: TableSpec, records: list[dict], vecs: dict, toks: dict) -> list[list]:
+        pk = spec.primary_key
+        out: list[list] = []
+        for i, rec in enumerate(records):
+            vals: list = [str(rec[pk])]
+            for col in spec.searchable:
+                v = vecs.get(col, [None] * len(records))[i]
+                vals.append(_l2_normalize(v) if v is not None else None)
+                vals.append(toks.get(col, [None] * len(records))[i])
+            out.append(vals)
+        return out
+
+    async def index_search_rows(self, spec: TableSpec, records: list[dict],
+                                vecs: dict, toks: dict) -> None:
+        """Write a batch's search-index rows. vss: no-op (the vectors live in
+        the duck rows, written by ``commit_rows``); lance: append to the
+        table's side dataset. Ordered after ``commit_rows`` in the write flow —
+        a lance append failure surfaces to the caller and ``rebuild`` heals."""
+        if not self._lance or not spec.searchable or not records:
+            return
+        payload = self._lance_payload(spec, records, vecs, toks)
+        await self._bridge.run(lambda: self._lance_write(spec, payload, mode="append"))
+
+    async def rebuild_search_index(self, spec: TableSpec, records: list[dict],
+                                   vecs: dict, toks: dict) -> None:
+        """Rebuild a table's search index wholesale (admin rebuild). vss: no-op
+        (``rebuild_fts`` covers it); lance: one overwrite COPY — also resets
+        the dataset's fragment count."""
+        if not self._lance or not spec.searchable:
+            return
+        payload = self._lance_payload(spec, records, vecs, toks)
+        await self._bridge.run(lambda: self._lance_write(spec, payload, mode="overwrite"))
+
+    # ─── search lowering (the pipeline `search` source; backend-branched) ─
+
+    def search_lower(self, table: str, col: str, qvec: list[float], qtok: str,
+                     k: int = _SEARCH_K, ds_start: str | None = None,
+                     ds_end: str | None = None) -> tuple[str, list]:
+        """The ``search`` source stage's duck lowering: one SQL (a CTE body)
+        fusing vector ANN + BM25 by RRF (k0=60) on ``col``, joined back to the
+        table's visible columns and emitting them plus ``_score``. Returns
+        ``(sql, params)``; the RRF fusion is shared across backends — only the
+        candidate arms differ (docs/works/search.md §3)."""
+        if self._vss:
+            return self._vss_search_sql(table, col, k, ds_start, ds_end), [qvec, qtok, qtok]
+        if self._lance:
+            return (self._lance_search_sql(table, col, k, ds_start, ds_end),
+                    [_l2_normalize(qvec), qtok])
+        raise QueryError("search needs a searchable column + an embedder")
+
+    def _vss_search_sql(self, table: str, col: str, k: int,
+                        ds_start: str | None, ds_end: str | None) -> str:
+        """vss+fts arms over the in-table columns. Both arms filter by the
+        *same* as-of predicate as the structured read (``_asof_conds``), so
+        search and query agree on what's alive as-of D. The HNSW/BM25 filter is
+        applied *after* each arm's top-k, so a live-as-of-D row can be crowded
+        out by now-live-but-not-then rows; on the historical path the candidate
+        pool is widened ``_OVERFETCH``×. Params: [qvec, qtok, qtok]."""
         spec = self._schema.table(table)
         phys = f"_sb_{table}"
         pk = spec.primary_key
@@ -188,6 +306,30 @@ class StoreService:
             f'SELECT base.*, _h.score AS _score '
             f"FROM ({self._visible(spec, ds_start, ds_end)}) base "
             f'JOIN _h ON CAST(base.{_ident(pk)} AS VARCHAR) = CAST(_h.pk AS VARCHAR)')
+
+    def _lance_search_sql(self, table: str, col: str, k: int,
+                          ds_start: str | None, ds_end: str | None) -> str:
+        """lance_vector_search + lance_fts arms over the side dataset, same RRF.
+        The arms carry no visibility predicate (the dataset has no ds columns),
+        so the as-of filter is applied by the join to the visible view and the
+        candidate pool is *always* widened ``_OVERFETCH``× to compensate.
+        Params: [qvec_normalized, qtok]."""
+        spec = self._schema.table(table)
+        pk = spec.primary_key
+        ds = self._lance_ds(table)
+        cand = k * _OVERFETCH                                     # arms can't pre-filter
+        return (
+            f"WITH _v AS (SELECT pk, row_number() OVER (ORDER BY _distance) rk "
+            f"FROM lance_vector_search('{ds}', 'vec_{col}', ?::FLOAT[{self._dim}], k={cand})), "
+            f"_f AS (SELECT pk, row_number() OVER (ORDER BY _score DESC) rk "
+            f"FROM lance_fts('{ds}', 'tok_{col}', ?, k={cand})), "
+            f"_h AS (SELECT COALESCE(_v.pk, _f.pk) pk, "
+            f"COALESCE(1.0/(60+_v.rk),0)+COALESCE(1.0/(60+_f.rk),0) score "
+            f"FROM _v FULL OUTER JOIN _f ON _v.pk=_f.pk) "
+            f'SELECT base.*, _h.score AS _score '
+            f"FROM ({self._visible(spec, ds_start, ds_end)}) base "
+            f'JOIN _h ON CAST(base.{_ident(pk)} AS VARCHAR) = _h.pk '
+            f"ORDER BY _score DESC LIMIT {k}")
 
     def visible_sql(self, table: str, ds_start: str | None, ds_end: str | None) -> str:
         """The table's visibility view SQL (the ``scan`` source's duck lowering)."""
@@ -274,7 +416,7 @@ class StoreService:
                      ds: str, now: str) -> None:
         json_cols = {c.name for c in spec.columns if c.type == "json"}
         cols = [*spec.column_names, DS, CREATED_AT, DELETED_DS, DELETED_AT]
-        if self._dim is not None:
+        if self._vss:
             for col in spec.searchable:
                 cols += [veccol(col), tokcol(col)]
         col_sql = ", ".join(_ident(c) for c in cols)
@@ -289,7 +431,7 @@ class StoreService:
                     v = json.dumps(v)
                 vals.append(v)
             vals += [ds, now, None, None]
-            if self._dim is not None:
+            if self._vss:
                 for col in spec.searchable:
                     vals.append(vecs.get(col, [None] * len(records))[i])
                     vals.append(toks.get(col, [None] * len(records))[i])
@@ -302,12 +444,12 @@ class StoreService:
         table's FTS index — in one bridge block, so a write settles atomically."""
         def _db() -> None:
             self._insert_rows(spec, records, vecs, toks, ds, now)
-            if rebuild_fts and self._dim is not None:
+            if rebuild_fts and self._vss:
                 self._rebuild_fts_inline(spec.name)
         await self._bridge.run(_db)
 
     async def rebuild_fts(self, table: str) -> None:
-        if self._dim is not None:
+        if self._vss:
             await self._bridge.run(lambda: self._rebuild_fts_inline(table))
 
     async def match_live(self, table: str, where: str, params: list[Any]) -> list:

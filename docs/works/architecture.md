@@ -1,6 +1,6 @@
 # architecture — 分层与调用链
 
-> 状态:**设计稿(pipeline 方向,未落)**。seekbase 的代码分层与一次调用怎么流过它们。**读是一根管道**(SPL 式,`stage | stage`,见 [pipeline-as-anything.md](pipeline-as-anything.md)):检索是一个 source 段、transform 段是原生 DuckDB SQL、算子段跳出 DuckDB。**结构化 DuckDB + 可插拔检索后端**(lance / duck-vss)+ 文件镜像;两种使用形态(嵌入 / HTTP)共用同一套 service。
+> 状态:**已落**(M1:`PipelineService` 编译器 + `operator/` 包 + 可插拔检索后端)。seekbase 的代码分层与一次调用怎么流过它们。**读是一根管道**(SPL 式,`stage | stage`,见 [pipeline-as-anything.md](pipeline-as-anything.md)):检索是一个 source 段、transform 段是原生 DuckDB SQL、算子段跳出 DuckDB。**结构化 DuckDB + 可插拔检索后端**(lance / duck-vss)+ 文件镜像;两种使用形态(嵌入 / HTTP)共用同一套 service。
 >
 > **和现网代码的差异**:现网读路径是 `ReadService` + rewrite 层(`extract_searches`/`search_target`/缝合)+ 单条 SQL,检索焊死在 DuckDB-vss;本文按管道方向把读路径换成**管道编译器**,rewrite 层退休、检索引擎可插拔。写路径(WriteService worker / ticket / files-first)基本不变。
 

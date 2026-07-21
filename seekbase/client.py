@@ -85,7 +85,13 @@ class Seekbase:
         *,
         schema: list,
         embedder: Embedder | None = None,
+        search_backend: str = "vss",
     ) -> "Seekbase":
+        """``search_backend`` picks the retrieval engine behind the pipeline's
+        ``search`` source (docs/works/search.md §5): ``"vss"`` (default —
+        DuckDB vss+fts in-table, single file, constant fds) or ``"lance"``
+        (side LanceDB datasets via the DuckDB lance extension — versioned,
+        per-write fragments; own the fd account)."""
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         parsed = parse_schema(schema)
@@ -97,7 +103,8 @@ class Seekbase:
         bridge = Bridge()
         embedding = EmbeddingService(embedder) if has_searchable else None
         dim = embedding.dim if embedding is not None else None
-        store = await StoreService.open(data_dir, parsed, bridge, dim=dim)
+        store = await StoreService.open(
+            data_dir, parsed, bridge, dim=dim, search_backend=search_backend)
         files = FileService(bridge, data_dir / "files")
         services = build_services(store, embedding, files, parsed, bridge, data_dir / "tickets")
         executor = LocalExecutor(services, store, bridge)

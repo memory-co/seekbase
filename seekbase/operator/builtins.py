@@ -57,8 +57,10 @@ class Search(Operator):
         qtok = ctx.embedding.tok(args.text)
         # Codegen inputs, derived once here (prepare = argument processing);
         # optimize_duck below just hands them over — it stays sync and ctx-free.
-        args._sql = ctx.store.search_cte(args.table, col, args.k, ctx.ds_start, ctx.ds_end)
-        args._params = [qvec, qtok, qtok]
+        # The engine behind the lowering is pluggable (vss | lance): the store
+        # branches per backend, the RRF fusion is shared.
+        args._sql, args._params = ctx.store.search_lower(
+            args.table, col, qvec, qtok, args.k, ctx.ds_start, ctx.ds_end)
 
     def optimize_duck(self, args):                       # source: no ``prev``
         return args._sql, args._params

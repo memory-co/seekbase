@@ -1,8 +1,8 @@
 # pipeline-as-anything — 用管道串联一切(SPL 式 query)
 
-> 状态:**设计稿(未落)**。一个和现状不同方向的推演:不再把 `search()` 做成内嵌 SQL 的 UDF,而是把 **query 本身变成一串管道**——`stage | stage | stage`,每个 stage 都是「吃一张表、吐一张表」的算子。搜索只是其中一个 **source 算子**(用 LanceDB 搜出来 → 物化成结果表 → 交给 DuckDB 的 `SELECT` 去查);同一根管道里还能串 `bash`、HTTP、embed 等任意算子。于是 seekbase 的 query 就成了一种 **SPL(Splunk 式 search processing language)**:检索是管道的一段,不是 SQL 里的一个函数。
+> 状态:**M1 已落**(duck runtime:`service/pipeline_service.py` 编译器 + `seekbase/operator/`;bash runtime / 内联桥未落)。不再把 `search()` 做成内嵌 SQL 的 UDF,而是把 **query 本身变成一串管道**——`stage | stage | stage`,每个 stage 都是「吃一张表、吐一张表」的算子。搜索只是其中一个 **source 算子**(用 LanceDB 搜出来 → 物化成结果表 → 交给 DuckDB 的 `SELECT` 去查);同一根管道里还能串 `bash`、HTTP、embed 等任意算子。于是 seekbase 的 query 就成了一种 **SPL(Splunk 式 search processing language)**:检索是管道的一段,不是 SQL 里的一个函数。
 >
-> 本文只推演设计,不描述已落代码。对照:现状把 `search()` 做成 SQL 一等算子、DuckDB-vss 后端,见 [search.md](search.md);那条路的重写/缝合之痛(本文 §3)正是本稿要绕开的东西。
+> 对照:旧路把 `search()` 做成 SQL 一等算子(重写/缝合,git 历史里,见 [search.md](search.md));那条路的痛(本文 §3)正是本稿绕开的东西——M1 已按本稿落地。
 
 ## 1. 一句话:query 从「一条 SQL」变成「一串管道」
 

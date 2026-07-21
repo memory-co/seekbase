@@ -1,6 +1,6 @@
 # operator-registry — 万物皆算子:注册机制 + 权限范围(Claude / Codex 式)
 
-> 状态:**设计稿(pipeline 方向,未落)**。管道里每一段的 verb(`search` / `grep` / `find` / `sed` / `sh` / `http` / `embed` …)都是一个**注册算子**。**`search` 不特殊——它只是一个注册算子、一条最佳实践**;`find`/`sed`/`grep` 是另外几条最佳实践,和 `search` 平级地注册进同一张表。本文定两件事:① 算子怎么注册(契约 + registry);② 算子的**使用范围怎么限**——像 Claude Code / Codex 那样按**能力(capability)+ 策略(policy)**授权,给 pipeline-as-anything §9「算子段是安全洞」一个正式的围栏。
+> 状态:**部分已落**(`operator/registry.py`:首 token 解析、SQL 缺省、命名守卫、caps 记录;能力×策略×沙箱的授权执行是 M2)。管道里每一段的 verb(`search` / `grep` / `find` / `sed` / `sh` / `http` / `embed` …)都是一个**注册算子**。**`search` 不特殊——它只是一个注册算子、一条最佳实践**;`find`/`sed`/`grep` 是另外几条最佳实践,和 `search` 平级地注册进同一张表。本文定两件事:① 算子怎么注册(契约 + registry);② 算子的**使用范围怎么限**——像 Claude Code / Codex 那样按**能力(capability)+ 策略(policy)**授权,给 pipeline-as-anything §9「算子段是安全洞」一个正式的围栏。
 >
 > 依赖:[pipeline-as-anything.md](pipeline-as-anything.md)(管道模型、`_in` 表 ABI、§2.1「接缝才切」、§9 的安全担忧)。
 

@@ -53,10 +53,12 @@ class FakeEmbedder:
         return out
 
 
-async def open_db(data_root, *, schema=SCHEMA, embedder="fake"):
+async def open_db(data_root, *, schema=SCHEMA, embedder="fake", search_backend="vss"):
     if embedder == "fake":
         embedder = FakeEmbedder()
-    return await Seekbase.open(Path(data_root) / "db", schema=schema, embedder=embedder)
+    return await Seekbase.open(
+        Path(data_root) / "db", schema=schema, embedder=embedder,
+        search_backend=search_backend)
 
 
 def client_for(server_db, *, app_key=None, client_key=None):

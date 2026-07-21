@@ -56,5 +56,7 @@ class AdminService:
             for pk_val, dds, dat in r["dels"]:
                 await self._store.soft_delete(spec.name, [pk_val], dds, dat)
                 result["tombstones"] += 1
-            await self._store.rebuild_fts(spec.name)
+            await self._store.rebuild_fts(spec.name)                       # vss backend
+            await self._store.rebuild_search_index(                        # lance backend
+                spec, r["recs"], r["vecs"], r["toks"])
         return await self._write.issue("rebuild", stats=result)

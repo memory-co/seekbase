@@ -1,6 +1,6 @@
 # store — 两层存储设计(files canonical / DuckDB 派生)
 
-> 状态:**files 层已落;检索后端按 pipeline 方向改为可插拔(设计稿)**。两层存储:**canonical 文件**(纯 append,权威)+ **派生层**——结构化 DuckDB + **可插拔检索后端**(duck-vss 就地长在业务表 / LanceDB 独立库,见 [search.md](search.md))。写入同步、主键写一次(重复报错);delete 是软删墓碑、无物理删 / vacuum(文件真·纯 append,零例外)。本文定下两层存储的角色、files 目录结构(**按天分区、每表一个 append 日志**)、insert 的「文件最先」原子性顺序,以及用 files 校准派生层的机制。
+> 状态:**已落**(files 层 + 可插拔检索后端:duck-vss 就地长在业务表 / LanceDB 侧数据集经 duck lance 扩展,`search_backend=` 选择)。两层存储:**canonical 文件**(纯 append,权威)+ **派生层**——结构化 DuckDB + **可插拔检索后端**(duck-vss 就地长在业务表 / LanceDB 独立库,见 [search.md](search.md))。写入同步、主键写一次(重复报错);delete 是软删墓碑、无物理删 / vacuum(文件真·纯 append,零例外)。本文定下两层存储的角色、files 目录结构(**按天分区、每表一个 append 日志**)、insert 的「文件最先」原子性顺序,以及用 files 校准派生层的机制。
 
 ## 1. 两层存储,一个端口
 

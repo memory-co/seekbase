@@ -1,8 +1,8 @@
 # search — 管道里的检索 source(可插拔引擎:LanceDB / DuckDB-vss)
 
-> 状态:**设计稿(pipeline 方向,未落)**。这一稿把检索从「SQL 里的 `search()` 一等算子」翻成「**管道的一个 source 段**」——`search <表> '文本'` 吃不了输入、产一张 `(pk, _score, …)` 结果表,交给下游 DuckDB `SELECT` 去查(见 [pipeline-as-anything.md](pipeline-as-anything.md))。检索**引擎藏在 source 段背后、可插拔**:LanceDB 或 DuckDB-`vss`+`fts`,产物都只承诺是一张表。
+> 状态:**已落**(`operator/builtins.py` Search + `store_service.py` search_lower;两后端经 `Seekbase.open(search_backend="vss"|"lance")` 可选,tests/search 双后端参数化跑同一套断言)。这一稿把检索从「SQL 里的 `search()` 一等算子」翻成「**管道的一个 source 段**」——`search <表> '文本'` 吃不了输入、产一张 `(pk, _score, …)` 结果表,交给下游 DuckDB `SELECT` 去查(见 [pipeline-as-anything.md](pipeline-as-anything.md))。检索**引擎藏在 source 段背后、可插拔**:LanceDB 或 DuckDB-`vss`+`fts`,产物都只承诺是一张表。
 >
-> **和现网代码的差异**:现网仍是 `search()` UDF + 单引擎 DuckDB-vss(重写/缝合那套,git 历史里);本文按管道方向重写,`search()` 函数**退休**,检索改由 source 段承担、引擎可换。survives:hybrid RRF(§3)、jieba 分词(§4)整段基本不变——它们是**引擎内部**的活,换外壳不换算法。
+> **实现要点**:`search()` UDF 已退休(重写/缝合那套在 git 历史里)。lance 后端**整个经 DuckDB `lance` 扩展**落地——写是 `COPY …(FORMAT lance)` append、查是 `lance_vector_search`/`lance_fts` 表函数,零独立 SDK/连接;向量两侧 L2 归一化(单位向量上 L2 排序 ≡ cosine);RRF(k0=60)两后端共享,lance 臂不带可见性谓词、恒 over-fetch ×4 由 join 可见视图补滤。hybrid RRF(§3)、jieba 分词(§4)为引擎内部,两后端不变。
 
 ## 1. 定位:检索是一个 source 段,不是 SQL 函数
 

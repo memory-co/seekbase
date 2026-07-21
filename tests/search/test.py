@@ -1,11 +1,29 @@
 """search — 语义检索(管道的 search 源段:`search <表> '文本' | SELECT … FROM _in`)。
+
+整个场景按 **search_backend 参数化跑两遍**(vss / lance)——同一套断言两个引擎
+都要过,这就是两后端的 differential test(排序、时间窗、软删、rebuild 语义一致)。
 See README.md."""
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 
 from seekbase import QueryError
 from tests.conftest import open_db
+
+
+@pytest.fixture(params=["vss", "lance"])
+def search_backend(request):
+    return request.param
+
+
+@pytest_asyncio.fixture
+async def db(tmp_path, search_backend):          # overrides conftest: both backends
+    d = await open_db(tmp_path, search_backend=search_backend)
+    try:
+        yield d
+    finally:
+        await d.close()
 
 
 async def _seed(db):
@@ -34,7 +52,7 @@ async def test_search_combines_with_structured_filter(db):
     assert hits == [{"card_id": "c2"}]
 
 
-async def test_per_column_search_is_independent(tmp_path):
+async def test_per_column_search_is_independent(tmp_path, search_backend):
     """Each searchable column has its own vector index: the same query text
     against different columns (``--col``) can rank differently."""
     schema = [{
@@ -44,7 +62,7 @@ async def test_per_column_search_is_independent(tmp_path):
         "primary": "id",
         "searchable": ["title", "body"],
     }]
-    db = await open_db(tmp_path, schema=schema)
+    db = await open_db(tmp_path, schema=schema, search_backend=search_backend)
     try:
         await db.wait(await db.insert("docs", [
             {"id": "d1", "title": "tmux terminal panes", "body": "redis cache eviction"},
@@ -62,7 +80,7 @@ async def test_per_column_search_is_independent(tmp_path):
         await db.close()
 
 
-async def test_multi_column_table_requires_col(tmp_path):
+async def test_multi_column_table_requires_col(tmp_path, search_backend):
     """A table with several searchable columns needs an explicit ``--col``;
     per-column scores come from one pipeline per column (the old multi-search
     single-SQL form is retired with the ``search()`` UDF)."""
@@ -73,7 +91,7 @@ async def test_multi_column_table_requires_col(tmp_path):
         "primary": "id",
         "searchable": ["title", "body"],
     }]
-    db = await open_db(tmp_path, schema=schema)
+    db = await open_db(tmp_path, schema=schema, search_backend=search_backend)
     try:
         await db.wait(await db.insert("docs", [
             {"id": "d1", "title": "tmux terminal panes", "body": "redis cache eviction"},
@@ -93,7 +111,7 @@ async def test_multi_column_table_requires_col(tmp_path):
         await db.close()
 
 
-async def test_chinese_hybrid_search(tmp_path):
+async def test_chinese_hybrid_search(tmp_path, search_backend):
     """中文:search = vss(向量语义)+ fts(BM25 关键词,jieba 分词)RRF 融合。
     关键词命中由 BM25 保证,和 embedder 语义质量无关。"""
     schema = [{
@@ -102,7 +120,7 @@ async def test_chinese_hybrid_search(tmp_path):
         "primary": "id",
         "searchable": ["body"],
     }]
-    db = await open_db(tmp_path, schema=schema)
+    db = await open_db(tmp_path, schema=schema, search_backend=search_backend)
     try:
         await db.wait(await db.insert("notes", [
             {"id": "n1", "body": "为什么伪终端 pty 会让人联想到 tmux 终端复用器"},
@@ -125,7 +143,7 @@ async def test_deleted_row_is_not_searchable(db):
     assert "c3" not in [h["card_id"] for h in hits]
 
 
-async def test_rebuild_repopulates_search(tmp_path):
+async def test_rebuild_repopulates_search(tmp_path, search_backend):
     """rebuild() clears the derived vss+fts projection and replays the file
     mirror; the consumer must repopulate it so search works again."""
     schema = [{
@@ -134,7 +152,7 @@ async def test_rebuild_repopulates_search(tmp_path):
         "primary": "id",
         "searchable": ["body"],
     }]
-    db = await open_db(tmp_path, schema=schema)
+    db = await open_db(tmp_path, schema=schema, search_backend=search_backend)
     try:
         await db.wait(await db.insert("notes", [
             {"id": "n1", "body": "缓存淘汰策略 LRU"},
@@ -158,7 +176,7 @@ async def test_search_respects_time_window(db):
     assert await db.query(q, ds_end="20000101") == []
 
 
-async def test_search_time_travels_over_deleted_rows(tmp_path, monkeypatch):
+async def test_search_time_travels_over_deleted_rows(tmp_path, monkeypatch, search_backend):
     """The search source shares the structured read's as-of predicate: a row
     deleted *now* is still searchable when the query time-travels to before its
     deletion (and a not-yet-created row stays invisible). The vss/fts index
@@ -172,7 +190,7 @@ async def test_search_time_travels_over_deleted_rows(tmp_path, monkeypatch):
     db = await open_db(tmp_path, schema=[{
         "table": "notes",
         "columns": [{"name": "id", "type": "str"}, {"name": "body", "type": "str"}],
-        "primary": "id", "searchable": ["body"]}])
+        "primary": "id", "searchable": ["body"]}], search_backend=search_backend)
     try:
         _freeze("20260102")
         await db.wait(await db.insert("notes", {"id": "n1", "body": "缓存淘汰策略 LRU 与 LFU"}))

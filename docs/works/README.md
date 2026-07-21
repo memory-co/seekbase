@@ -2,7 +2,7 @@
 
 深入某个子系统的设计推演。总览设计见仓库根的 [DESIGN.md](../../DESIGN.md);这里放更细的专题。
 
-> **方向说明**:本套文档已按 **pipeline 方向(设计稿,未落)**对齐——query 是一根 SPL 式管道(`stage | stage`),**SQL 是一等公民、也是缺省**,检索/`grep`/`sh` 等都是**注册算子**,检索**引擎可插拔**(LanceDB / DuckDB-vss)。现网代码仍是旧形态(`search()` UDF + 单引擎 DuckDB);各文档状态行标注了与现网的差异。存储/时光机/写路径的底层机制多数不变,只是被重新框进管道架构。
+> **方向说明**:pipeline 方向**已开始落地**——M1(管道编译器 + `Operator` 基类 + `search`/`scan`/`grep`,duck runtime,`seekbase/operator/` + `service/pipeline_service.py`)与**可插拔检索后端**(vss / lance,`Seekbase.open(search_backend=…)`)已上线,`search()` UDF 退休。query 是一根 SPL 式管道(`stage | stage`),**SQL 是一等公民、也是缺省**。**未落**:bash runtime + 能力×策略沙箱、runtime 指派/融合优化、流式摄取;各文档状态行标注各自的落地程度。
 
 **架构主线(先读这两篇):**
 

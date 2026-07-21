@@ -128,6 +128,7 @@ class WriteService:
             ds, ts = today(), now()
             await self._files.write_puts(spec, records, ds, ts)        # canonical, files first
             await self._store.commit_rows(spec, records, vecs, toks, ds, ts, rebuild_fts=False)
+            await self._store.index_search_rows(spec, records, vecs, toks)   # lance append (vss: no-op)
             return "insert", {}, (table if self._embedding is not None else None)
         if kind == "delete":
             _, table, where, params = op
