@@ -14,7 +14,7 @@
 
 ## 不在这测什么
 
-- 语义 `search()` / embedder 走 [`schema/`](../schema/) 的接线 + M3
+- 语义 `search` 段 / embedder 走 [`search/`](../search/) 与 [`schema/`](../schema/)
 - 墓碑物理还在、raw SQL 能看到 的细节走 [`insert_only/`](../insert_only/)
 - SQL 查询的完整用法走 [`read_write/`](../read_write/)
 - server / HTTP 形态走 [`server/`](../server/)

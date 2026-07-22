@@ -13,7 +13,7 @@
 ## 不在这测什么
 
 - 墓碑本身(删完还在)走 [`insert_only/`](../insert_only/)
-- `search()` 叠加时间窗走 [`search/`](../search/)
+- `search` 段叠加时间窗走 [`search/`](../search/)
 - HTTP 上的时间窗走 [`server/`](../server/)
 
 ## fixture 来源

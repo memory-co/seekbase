@@ -9,9 +9,9 @@ from ._route import Endpoint
 
 
 async def handle(db, body: dict, params: dict) -> tuple[int, dict]:
-    ticket = await db.services.write.delete(
+    task = await db.services.write.delete(
         body.get("table"), body.get("where"), body.get("params") or [])
-    return 200, ticket.to_wire()
+    return 200, task.to_wire()
 
 
 ENDPOINT = Endpoint("POST", "/v1/delete", handle)
